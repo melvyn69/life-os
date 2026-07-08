@@ -17,7 +17,7 @@ export class AuthRequiredError extends Error {
   }
 }
 
-async function getCurrentUserId() {
+export async function getCurrentUserId() {
   const { data, error } = await supabase.auth.getUser();
 
   if (error) {
@@ -68,8 +68,8 @@ export function isInboxCandidateCapture(capture: Pick<Capture, "status">) {
 export async function listInboxCaptures() {
   const userId = await getCurrentUserId();
 
-  // Inbox shows captures awaiting analysis. In PR3 there is no analysis marker yet,
-  // so active captures are the canonical, not-archived, not-deleted candidates.
+  // Active captures are raw inbox candidates. Once analysis succeeds, the Edge
+  // Function archives the raw capture and creates suggested observations.
   const { data, error } = await supabase
     .from("captures")
     .select("*")

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createCapture, listInboxCaptures } from "@/services/captures";
 
-const inboxCapturesQueryKey = ["captures", "inbox"] as const;
+export const inboxCapturesQueryKey = ["captures", "inbox"] as const;
 
 export function useCaptures() {
   return useQuery({
