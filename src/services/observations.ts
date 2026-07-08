@@ -1,5 +1,7 @@
 import { supabase } from "@/lib/supabase";
 import { getCurrentUserId } from "@/services/captures";
+import type { Entity } from "@/services/entities";
+import type { Memory } from "@/services/memories";
 import type { Database } from "@/types/database";
 
 export type Observation = Database["public"]["Tables"]["observations"]["Row"];
@@ -8,6 +10,12 @@ export type SuggestedObservation = Observation & {
     content: string;
     created_at: string;
   } | null;
+};
+
+type ProcessObservationsResponse = {
+  entities: Entity[];
+  memories: Memory[];
+  prompt_version?: string;
 };
 
 export async function listSuggestedObservations() {
@@ -25,4 +33,25 @@ export async function listSuggestedObservations() {
   }
 
   return data as SuggestedObservation[];
+}
+
+export async function processObservations(captureId: string) {
+  const { data, error } = await supabase.functions.invoke<ProcessObservationsResponse>(
+    "process-observations",
+    {
+      body: {
+        capture_id: captureId
+      }
+    }
+  );
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data) {
+    throw new Error("No observation processing response returned.");
+  }
+
+  return data;
 }

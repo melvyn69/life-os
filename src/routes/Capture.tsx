@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { useCreateCapture } from "@/hooks/useCaptures";
+import { getUserFacingErrorMessage } from "@/lib/errors";
 
 export function Capture() {
   const [content, setContent] = useState("");
@@ -53,7 +54,7 @@ export function Capture() {
 
         {createCapture.isError ? (
           <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-            {createCapture.error.message}
+            {getUserFacingErrorMessage(createCapture.error, "Unable to save this capture right now.")}
           </p>
         ) : null}
 

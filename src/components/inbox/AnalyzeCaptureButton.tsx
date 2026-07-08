@@ -2,6 +2,7 @@ import { WandSparkles } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { inboxCapturesQueryKey } from "@/hooks/useCaptures";
 import { suggestedObservationsQueryKey } from "@/hooks/useObservations";
+import { getUserFacingErrorMessage } from "@/lib/errors";
 import { analyzeCapture } from "@/services/ai";
 
 type AnalyzeCaptureButtonProps = {
@@ -32,7 +33,10 @@ export function AnalyzeCaptureButton({ captureId }: AnalyzeCaptureButtonProps) {
 
       {analyzeCaptureMutation.isError ? (
         <p className="text-sm leading-5 text-destructive">
-          {analyzeCaptureMutation.error.message}
+          {getUserFacingErrorMessage(
+            analyzeCaptureMutation.error,
+            "Unable to analyze this capture right now."
+          )}
         </p>
       ) : null}
     </div>

@@ -18,10 +18,16 @@ export class AuthRequiredError extends Error {
 }
 
 export async function getCurrentUserId() {
+  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+
+  if (sessionError || !sessionData.session) {
+    throw new AuthRequiredError();
+  }
+
   const { data, error } = await supabase.auth.getUser();
 
   if (error) {
-    throw error;
+    throw new AuthRequiredError();
   }
 
   if (!data.user) {

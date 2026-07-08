@@ -1,6 +1,9 @@
 import { AnalyzeCaptureButton } from "@/components/inbox/AnalyzeCaptureButton";
+import { ProcessObservationsButton } from "@/components/inbox/ProcessObservationsButton";
 import { useCaptures } from "@/hooks/useCaptures";
 import { useSuggestedObservations } from "@/hooks/useObservations";
+import { AuthRequiredState } from "@/components/common/AuthRequiredState";
+import { getUserFacingErrorMessage, isAuthRequiredError } from "@/lib/errors";
 import type { SuggestedObservation } from "@/services/observations";
 
 export function Inbox() {
@@ -20,11 +23,15 @@ export function Inbox() {
   }
 
   if (isError) {
+    if (isAuthRequiredError(error)) {
+      return <AuthRequiredState />;
+    }
+
     return (
       <section className="space-y-4">
         <InboxHeader />
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm leading-6 text-destructive">
-          {error.message}
+          Unable to load inbox right now.
         </div>
       </section>
     );
@@ -108,6 +115,8 @@ function SuggestedObservationsSection({
   isLoading: boolean;
   observations: SuggestedObservation[];
 }) {
+  const observationGroups = groupSuggestedObservations(observations);
+
   return (
     <div className="space-y-3 pt-3">
       <h3 className="text-sm font-semibold uppercase tracking-normal text-muted-foreground">
@@ -120,7 +129,7 @@ function SuggestedObservationsSection({
 
       {isError ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm leading-6 text-destructive">
-          {error?.message ?? "Unable to load suggested observations."}
+          {getUserFacingErrorMessage(error, "Unable to load suggested observations right now.")}
         </div>
       ) : null}
 
@@ -135,28 +144,77 @@ function SuggestedObservationsSection({
 
       {!isLoading && !isError && observations.length > 0 ? (
         <div className="space-y-3">
-          {observations.map((observation) => (
+          {observationGroups.map((group) => (
             <article
               className="rounded-lg border border-border bg-card p-4 text-card-foreground shadow-sm"
-              key={observation.id}
+              key={group.key}
             >
-              <p className="text-sm leading-6">{observation.content}</p>
-              <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
-                <ObservationBadge label={observation.type} />
-                <ObservationBadge label={observation.confidence} />
-                <ObservationBadge label={observation.sensitivity} />
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-normal text-muted-foreground">
+                    Source capture
+                  </p>
+                  <p className="mt-2 line-clamp-3 text-sm leading-6">
+                    {group.captureContent ?? "Capture unavailable"}
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {formatCaptureDate(group.createdAt)}
+                  </p>
+                </div>
+                {group.captureId ? <ProcessObservationsButton captureId={group.captureId} /> : null}
               </div>
-              {observation.captures ? (
-                <p className="mt-3 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                  From: {observation.captures.content}
-                </p>
-              ) : null}
+
+              <div className="mt-4 space-y-4 border-t border-border pt-4">
+                {group.observations.map((observation) => (
+                  <div key={observation.id}>
+                    <p className="text-sm leading-6">{observation.content}</p>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                      <ObservationBadge label={observation.type} />
+                      <ObservationBadge label={observation.confidence} />
+                      <ObservationBadge label={observation.sensitivity} />
+                    </div>
+                  </div>
+                ))}
+              </div>
             </article>
           ))}
         </div>
       ) : null}
     </div>
   );
+}
+
+function groupSuggestedObservations(observations: SuggestedObservation[]) {
+  const groups = new Map<
+    string,
+    {
+      captureContent: string | null;
+      captureId: string | null;
+      createdAt: string;
+      key: string;
+      observations: SuggestedObservation[];
+    }
+  >();
+
+  for (const observation of observations) {
+    const key = observation.capture_id ?? observation.id;
+    const existingGroup = groups.get(key);
+
+    if (existingGroup) {
+      existingGroup.observations.push(observation);
+      continue;
+    }
+
+    groups.set(key, {
+      captureContent: observation.captures?.content ?? null,
+      captureId: observation.capture_id,
+      createdAt: observation.captures?.created_at ?? observation.created_at,
+      key,
+      observations: [observation]
+    });
+  }
+
+  return [...groups.values()];
 }
 
 function ObservationBadge({ label }: { label: string }) {
