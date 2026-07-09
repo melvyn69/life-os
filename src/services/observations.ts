@@ -8,6 +8,15 @@ export type Observation = Database["public"]["Tables"]["observations"]["Row"];
 export type EntityDuplicateCandidate = Database["public"]["Tables"]["entity_duplicate_candidates"]["Row"];
 export type MemoryEvidence = Database["public"]["Tables"]["memory_evidence"]["Row"];
 export type MemoryContradiction = Database["public"]["Tables"]["memory_contradictions"]["Row"];
+export type ConfidenceChange = {
+  confidence: "low" | "medium" | "high";
+  evidence_observation_ids: string[];
+  independent_source_count: number;
+  previous_confidence: "low" | "medium" | "high";
+  reason: string;
+  record_id: string;
+  record_type: "entity" | "memory";
+};
 export type SuggestedObservation = Observation & {
   captures: {
     content: string;
@@ -16,6 +25,7 @@ export type SuggestedObservation = Observation & {
 };
 
 type ProcessObservationsResponse = {
+  confidence_changes?: ConfidenceChange[];
   contradictions?: MemoryContradiction[];
   duplicate_candidates?: EntityDuplicateCandidate[];
   evidence?: MemoryEvidence[];
