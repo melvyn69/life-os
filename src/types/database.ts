@@ -292,6 +292,69 @@ export type Database = {
           }
         ];
       };
+      memory_history_events: {
+        Row: {
+          id: string;
+          user_id: string;
+          record_type: "entity" | "memory";
+          entity_id: string | null;
+          memory_id: string | null;
+          event_type: "baseline" | "confidence_evolved" | "user_validated" | "archived" | "hidden" | "status_changed" | "corrected";
+          reason: string;
+          previous_state: Json | null;
+          current_state: Json;
+          evidence_ids: string[];
+          evidence_observation_ids: string[];
+          has_unresolved_contradiction: boolean;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          record_type: "entity" | "memory";
+          entity_id?: string | null;
+          memory_id?: string | null;
+          event_type: "baseline" | "confidence_evolved" | "user_validated" | "archived" | "hidden" | "status_changed" | "corrected";
+          reason: string;
+          previous_state?: Json | null;
+          current_state: Json;
+          evidence_ids?: string[];
+          evidence_observation_ids?: string[];
+          has_unresolved_contradiction?: boolean;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          record_type?: "entity" | "memory";
+          entity_id?: string | null;
+          memory_id?: string | null;
+          event_type?: "baseline" | "confidence_evolved" | "user_validated" | "archived" | "hidden" | "status_changed" | "corrected";
+          reason?: string;
+          previous_state?: Json | null;
+          current_state?: Json;
+          evidence_ids?: string[];
+          evidence_observation_ids?: string[];
+          has_unresolved_contradiction?: boolean;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "memory_history_events_entity_id_fkey";
+            columns: ["entity_id"];
+            isOneToOne: false;
+            referencedRelation: "entities";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "memory_history_events_memory_id_fkey";
+            columns: ["memory_id"];
+            isOneToOne: false;
+            referencedRelation: "memories";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
       memory_contradictions: {
         Row: {
           id: string;
