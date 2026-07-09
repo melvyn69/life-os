@@ -237,6 +237,61 @@ export type Database = {
           }
         ];
       };
+      memory_evidence: {
+        Row: {
+          id: string;
+          user_id: string;
+          observation_id: string;
+          entity_id: string | null;
+          memory_id: string | null;
+          direction: "supports" | "contradicts";
+          reason: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          observation_id: string;
+          entity_id?: string | null;
+          memory_id?: string | null;
+          direction: "supports" | "contradicts";
+          reason: string;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          observation_id?: string;
+          entity_id?: string | null;
+          memory_id?: string | null;
+          direction?: "supports" | "contradicts";
+          reason?: string;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "memory_evidence_entity_id_fkey";
+            columns: ["entity_id"];
+            isOneToOne: false;
+            referencedRelation: "entities";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "memory_evidence_memory_id_fkey";
+            columns: ["memory_id"];
+            isOneToOne: false;
+            referencedRelation: "memories";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "memory_evidence_observation_id_fkey";
+            columns: ["observation_id"];
+            isOneToOne: false;
+            referencedRelation: "observations";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
       memory_contradictions: {
         Row: {
           id: string;

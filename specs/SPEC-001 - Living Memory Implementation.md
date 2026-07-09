@@ -733,6 +733,16 @@ The required behavior is qualitative:
 - corrections should reshape future behavior;
 - history should remain traceable.
 
+### Canonical Confidence Rules
+
+Confidence is derived from accumulated evidence. Evidence must therefore be recorded before a confidence decision is made.
+
+Contradictions create uncertainty. They must never automatically reduce the confidence of an entity or memory.
+
+Only explicit user validation may produce `confirmed` confidence. AI may promote confidence only up to `high` after the evidence layer is available.
+
+Every confidence change must eventually be historically explainable through its supporting evidence, user action, or correction.
+
 ---
 
 ## 8. Contradiction Strategy
@@ -922,15 +932,11 @@ It also protects future engineering work from building on hidden assumptions.
 
 ### Confidence Changes
 
-Confidence should evolve with evidence.
+Confidence should evolve only after evidence has accumulated.
 
-It may increase when observations converge, context remains stable, relationships support the same interpretation, and the user confirms.
+AI may increase confidence up to `high` when observations converge, context remains stable, and relationships support the same interpretation. Explicit user validation alone may produce `confirmed` confidence.
 
-It may decrease when contradictions appear, context changes, an alias becomes ambiguous, a user correction arrives, or old information stops being supported.
-
-Decreasing confidence is healthy.
-
-It means the memory is alive enough to retreat from unsupported assumptions.
+Contradictions must be preserved as uncertainty and must not automatically reduce confidence. A user correction may later lower or replace prior confidence through an explicit, traceable decision.
 
 ### Memory States Over Time
 
@@ -1172,7 +1178,7 @@ Expected behavior:
 
 - conflicting facts remain visible to the memory layer;
 - old and new evidence are both preserved;
-- contradictions can lower confidence;
+- contradictions create uncertainty without automatically lowering confidence;
 - contradictions can trigger validation when consequential;
 - contradictions explained by time become evolution rather than error.
 
@@ -1249,108 +1255,102 @@ Each PR should compile independently, remain inside scope, and avoid unrelated p
 
 The suggested implementation order is below.
 
-### PR 1 - Living Memory Decision Vocabulary
+### PR 1 - Entity Enrichment
 
 Goal
 
-Define the conceptual decision states and shared vocabulary required by Living Memory.
+Allow supported observations to add context to an existing entity without overwriting its prior context.
 
 Scope
 
-- introduce decision categories for create, enrich, unresolved, validation, contradiction, merge, archive, and ignore;
-- define confidence and sensitivity behavior boundaries;
-- document how decisions relate to existing observations, entities, and memories;
-- add focused tests for decision classification behavior where applicable.
-
-Acceptance criteria
-
-- all canonical decisions are represented consistently;
-- no user-facing product redesign is introduced;
-- no automatic merging is introduced;
-- existing v0.1 behavior continues to compile and operate.
-
-### PR 2 - Candidate Matching Layer
-
-Goal
-
-Add a candidate matching step between observation processing and memory decisions.
-
-Scope
-
-- identify possible existing entities for a new observation;
-- identify likely new entities;
-- identify possible duplicates and aliases;
-- preserve unresolved references;
-- expose candidate match reasons for later evaluation.
-
-Acceptance criteria
-
-- matching produces candidates rather than final mutations;
-- ambiguous matches remain unresolved;
-- candidate reasons are traceable;
-- existing entity creation flows are not broken.
-
-### PR 3 - Evidence Evaluation Layer
-
-Goal
-
-Evaluate candidate matches against evidence before memory changes occur.
-
-Scope
-
-- evaluate supporting and weakening evidence;
-- consider temporal context, recurring relationships, confirmations, corrections, and sensitivity;
-- determine whether a candidate is safe to use, should wait, should ask, or should preserve contradiction;
-- add tests for evidence-driven confidence changes.
-
-Acceptance criteria
-
-- repeated evidence can strengthen confidence;
-- contradictions can weaken confidence;
-- sensitive conclusions require stronger support;
-- user corrections override system inference.
-
-### PR 4 - Entity Enrichment And Duplicate Protection
-
-Goal
-
-Allow entities to evolve without creating false merges.
-
-Scope
-
-- enrich existing entities with aliases, roles, relationships, and context when supported;
-- detect possible duplicates without merging by default;
-- require stronger evidence or validation for merges;
-- preserve distinction between known same, known different, and possibly related.
+- enrich entities with cautious aliases, roles, and context;
+- preserve prior entity context;
+- keep uncertain enrichment as a suggestion.
 
 Acceptance criteria
 
 - enrichment does not overwrite prior entity context;
-- possible duplicates are visible to the memory layer;
-- ambiguous people are not merged automatically;
-- confirmed aliases improve future matching.
+- source observations remain preserved;
+- existing v0.1 behavior continues to compile and operate.
 
-### PR 5 - Contradiction Handling
+### PR 2 - Duplicate Detection
 
 Goal
 
-Preserve contradictions as first-class memory events.
+Identify possible duplicate entities without forcing a merge.
+
+Scope
+
+- identify possible duplicates and aliases;
+- preserve unresolved references and match reasons;
+- keep automatic merge out of scope.
+
+Acceptance criteria
+
+- duplicate detection produces candidates rather than final mutations;
+- ambiguous matches remain unresolved;
+- candidate reasons are traceable;
+- false merges are not introduced.
+
+### PR 3 - Contradiction Handling
+
+Goal
+
+Preserve conflicts between new observations and existing memory.
 
 Scope
 
 - detect conflicts between new observations and existing memory;
 - distinguish possible change from possible error;
-- lower confidence or request validation when needed;
 - preserve competing facts until resolved.
 
 Acceptance criteria
 
 - contradictory observations do not overwrite existing memory;
 - contradictions are traceable to evidence;
-- user clarification can resolve a contradiction;
 - unresolved contradictions are not used as settled truth.
 
-### PR 6 - Memory History And Confidence Evolution
+### PR 4 - Evidence Accumulation
+
+Goal
+
+Persist the evidence that supports or contradicts a proposed entity or memory decision.
+
+Scope
+
+- record each source observation that supports a proposed entity or memory;
+- record contradiction evidence against the affected entity or memory;
+- preserve source ownership and traceability;
+- do not change confidence values, write memory history, or add user validation behavior.
+
+Acceptance criteria
+
+- evidence is linked to an owned observation and exactly one owned entity or memory;
+- repeated processing does not duplicate the same evidence link;
+- contradictions accumulate uncertainty without mutating confidence;
+- no confidence value changes in this PR.
+
+### PR 5 - Confidence Evolution
+
+Goal
+
+Derive cautious confidence changes from accumulated evidence.
+
+Scope
+
+- evaluate supporting evidence, temporal context, and uncertainty;
+- allow AI to promote confidence no higher than `high`;
+- preserve contradiction as uncertainty rather than an automatic downgrade;
+- reserve `confirmed` for explicit user validation.
+
+Acceptance criteria
+
+- every AI confidence change is derived from recorded evidence;
+- no AI path produces `confirmed` confidence;
+- contradictions do not automatically reduce confidence;
+- unresolved uncertainty prevents overconfident use.
+
+### PR 6 - Memory History
 
 Goal
 
@@ -1359,7 +1359,6 @@ Preserve how memories and entities change over time.
 Scope
 
 - record meaningful memory evolution events;
-- support confidence increases and decreases;
 - preserve correction history;
 - support archive and obsolete states conceptually;
 - ensure previous understanding remains reconstructable.
@@ -1367,39 +1366,40 @@ Scope
 Acceptance criteria
 
 - memory changes can be traced to evidence;
-- confidence can decrease without deleting memory;
+- confidence changes can be explained through evidence and user action;
 - archived memory has reduced current influence;
 - user corrections remain authoritative.
 
-### PR 7 - Briefing Integration
+### PR 7 - Human Validation
 
 Goal
 
-Ensure briefings consume Living Memory responsibly.
+Give the user selective, authoritative control over consequential memory decisions.
 
 Scope
 
-- prefer current, stable, relevant memories;
-- avoid presenting unresolved, contradicted, or weak memory as fact;
-- use cautious language when uncertainty is useful;
-- avoid proactive suggestion behavior.
+- request validation only when uncertainty has meaningful consequences;
+- make explicit validation the only path to `confirmed` confidence;
+- preserve corrections as authoritative input;
+- avoid interrupting the user for low-impact uncertainty.
 
 Acceptance criteria
 
-- briefings do not expose internal memory machinery;
-- contradicted memories are not treated as current truth;
-- low-confidence candidates are omitted unless explicitly relevant;
-- v0.1 briefing behavior remains simple.
+- validation is specific, optional where appropriate, and user-owned;
+- explicit validation can produce `confirmed` confidence;
+- user correction changes future memory behavior without deleting prior evidence;
+- low-impact uncertainty remains non-interruptive.
 
-### PR 8 - End-To-End Living Memory Validation
+### PR 8 - Final Readiness
 
 Goal
 
-Validate the full v0.2 memory behavior across realistic scenarios.
+Validate the complete v0.2 Living Memory behavior across realistic scenarios.
 
 Scope
 
 - add end-to-end scenarios for duplicate detection, enrichment, contradiction, validation, merge, archive, and ignore;
+- verify evidence accumulation precedes confidence evolution;
 - verify false-positive protection;
 - verify history preservation;
 - document known limitations for future versions.
@@ -1534,7 +1534,7 @@ v0.2 is complete when:
 - Life OS can detect possible duplicates without automatically merging them;
 - Life OS can enrich entities while preserving prior history;
 - Life OS can accumulate evidence across observations;
-- Life OS can increase, decrease, or preserve confidence based on evidence;
+- Life OS can derive confidence from accumulated evidence without allowing contradictions to automatically reduce it;
 - Life OS can treat user confirmation and correction as authoritative;
 - Life OS can preserve contradictions until they are clarified, explained by time, or safely left unresolved;
 - Life OS can archive inactive or obsolete memory without deleting history;

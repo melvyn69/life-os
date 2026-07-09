@@ -6,6 +6,7 @@ import type { Database } from "@/types/database";
 
 export type Observation = Database["public"]["Tables"]["observations"]["Row"];
 export type EntityDuplicateCandidate = Database["public"]["Tables"]["entity_duplicate_candidates"]["Row"];
+export type MemoryEvidence = Database["public"]["Tables"]["memory_evidence"]["Row"];
 export type MemoryContradiction = Database["public"]["Tables"]["memory_contradictions"]["Row"];
 export type SuggestedObservation = Observation & {
   captures: {
@@ -17,6 +18,7 @@ export type SuggestedObservation = Observation & {
 type ProcessObservationsResponse = {
   contradictions?: MemoryContradiction[];
   duplicate_candidates?: EntityDuplicateCandidate[];
+  evidence?: MemoryEvidence[];
   entities: Entity[];
   memories: Memory[];
   prompt_version?: string;
