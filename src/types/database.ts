@@ -237,6 +237,82 @@ export type Database = {
           }
         ];
       };
+      memory_contradictions: {
+        Row: {
+          id: string;
+          user_id: string;
+          observation_id: string | null;
+          entity_id: string | null;
+          memory_id: string | null;
+          existing_record_type: "entity" | "memory";
+          contradiction_type: "date" | "location" | "organization" | "project_status" | "role";
+          existing_content: string;
+          new_content: string;
+          reason: string;
+          confidence: "medium" | "high";
+          resolution_status: "unresolved" | "resolved" | "dismissed";
+          status: LifeOsStatus;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          observation_id?: string | null;
+          entity_id?: string | null;
+          memory_id?: string | null;
+          existing_record_type: "entity" | "memory";
+          contradiction_type: "date" | "location" | "organization" | "project_status" | "role";
+          existing_content: string;
+          new_content: string;
+          reason: string;
+          confidence?: "medium" | "high";
+          resolution_status?: "unresolved" | "resolved" | "dismissed";
+          status?: LifeOsStatus;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          observation_id?: string | null;
+          entity_id?: string | null;
+          memory_id?: string | null;
+          existing_record_type?: "entity" | "memory";
+          contradiction_type?: "date" | "location" | "organization" | "project_status" | "role";
+          existing_content?: string;
+          new_content?: string;
+          reason?: string;
+          confidence?: "medium" | "high";
+          resolution_status?: "unresolved" | "resolved" | "dismissed";
+          status?: LifeOsStatus;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "memory_contradictions_entity_id_fkey";
+            columns: ["entity_id"];
+            isOneToOne: false;
+            referencedRelation: "entities";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "memory_contradictions_memory_id_fkey";
+            columns: ["memory_id"];
+            isOneToOne: false;
+            referencedRelation: "memories";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "memory_contradictions_observation_id_fkey";
+            columns: ["observation_id"];
+            isOneToOne: false;
+            referencedRelation: "observations";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
       briefings: {
         Row: {
           id: string;

@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.110.1";
 
 type LifeOsSupabaseClient = ReturnType<typeof createClient<any>>;
 type Confidence = "low" | "medium" | "high";
+type StoredConfidence = Confidence | "confirmed";
 type Sensitivity = "normal" | "sensitive";
 type EntityType =
   | "person"
@@ -23,9 +24,20 @@ type Observation = {
 };
 
 type ExistingEntity = {
+  confidence: StoredConfidence;
+  description: string | null;
   id: string;
   name: string;
   type: string;
+  status: string;
+};
+
+type ExistingMemory = {
+  confidence: StoredConfidence;
+  content: string;
+  entity_id: string | null;
+  id: string;
+  observation_id: string | null;
   status: string;
 };
 
@@ -48,6 +60,36 @@ type DuplicateCandidate = {
   duplicate_entity_id: string;
   reason: DuplicateCandidateReason;
   confidence: "medium" | "high";
+  status: "suggested";
+};
+
+type ContradictionType = "date" | "location" | "organization" | "project_status" | "role";
+
+type ContradictionFact = {
+  raw: string;
+  subject: string | null;
+  type: ContradictionType;
+  value: string;
+};
+
+type ContradictionEvidence = {
+  content: string;
+  entityId: string | null;
+  observationId: string | null;
+};
+
+type MemoryContradiction = {
+  user_id: string;
+  observation_id: string | null;
+  entity_id: string | null;
+  memory_id: string | null;
+  existing_record_type: "entity" | "memory";
+  contradiction_type: ContradictionType;
+  existing_content: string;
+  new_content: string;
+  reason: string;
+  confidence: "medium" | "high";
+  resolution_status: "unresolved";
   status: "suggested";
 };
 
@@ -266,7 +308,7 @@ Deno.serve(async (request) => {
 
     const { data: existingEntities, error: entitiesError } = await supabase
       .from("entities")
-      .select("id, name, type, status")
+      .select("id, name, type, description, confidence, status")
       .eq("user_id", user.id)
       .in("status", ["suggested", "active", "confirmed"]);
 
@@ -332,6 +374,8 @@ Deno.serve(async (request) => {
 
     for (const entity of insertedEntities) {
       const insertedEntity = {
+        confidence: entity.confidence,
+        description: entity.description,
         id: entity.id,
         name: entity.name,
         status: entity.status,
@@ -390,11 +434,28 @@ Deno.serve(async (request) => {
         };
       });
 
+    const existingConfirmedMemories = await listExistingConfirmedMemories(supabase, user.id);
+    const contradictionEvidence = buildContradictionEvidence({
+      knownEntities,
+      memoriesToInsert,
+      observations: suggestedObservations
+    });
+    const contradictionCandidates = buildMemoryContradictions({
+      evidence: contradictionEvidence,
+      existingEntities: knownEntities,
+      existingMemories: existingConfirmedMemories,
+      userId: user.id
+    });
+    const insertedContradictions = contradictionCandidates.length > 0
+      ? await insertMemoryContradictions(supabase, user.id, contradictionCandidates)
+      : [];
+
     const insertedMemories = memoriesToInsert.length > 0
       ? await insertMemories(supabase, memoriesToInsert)
       : [];
 
     return jsonResponse({
+      contradictions: insertedContradictions,
       duplicate_candidates: insertedDuplicateCandidates,
       entities: insertedEntities,
       memories: insertedMemories,
@@ -652,6 +713,75 @@ async function listExistingSuggestedMemoriesForObservations(
   }
 
   return (data ?? []) as Array<{ observation_id: string | null; content: string }>;
+}
+
+async function listExistingConfirmedMemories(
+  supabase: LifeOsSupabaseClient,
+  userId: string
+) {
+  const { data, error } = await supabase
+    .from("memories")
+    .select("id, entity_id, observation_id, content, confidence, status")
+    .eq("user_id", userId)
+    .in("status", ["active", "confirmed"])
+    .in("confidence", ["high", "confirmed"]);
+
+  if (error) {
+    throw error;
+  }
+
+  return (data ?? []) as ExistingMemory[];
+}
+
+async function insertMemoryContradictions(
+  supabase: LifeOsSupabaseClient,
+  userId: string,
+  contradictions: MemoryContradiction[]
+) {
+  const { data: existingContradictions, error: existingContradictionsError } = await supabase
+    .from("memory_contradictions")
+    .select("observation_id, entity_id, memory_id, contradiction_type, existing_content, new_content")
+    .eq("user_id", userId)
+    .eq("resolution_status", "unresolved")
+    .in("status", ["suggested", "active", "confirmed"]);
+
+  if (existingContradictionsError) {
+    throw existingContradictionsError;
+  }
+
+  const existingContradictionKeys = new Set(
+    (existingContradictions ?? []).map((contradiction) =>
+      buildContradictionKey(contradiction as Pick<
+        MemoryContradiction,
+        "contradiction_type" | "entity_id" | "existing_content" | "memory_id" | "new_content" | "observation_id"
+      >)
+    )
+  );
+  const contradictionsToInsert = contradictions.filter((contradiction) => {
+    const contradictionKey = buildContradictionKey(contradiction);
+
+    if (existingContradictionKeys.has(contradictionKey)) {
+      return false;
+    }
+
+    existingContradictionKeys.add(contradictionKey);
+    return true;
+  });
+
+  if (contradictionsToInsert.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("memory_contradictions")
+    .insert(contradictionsToInsert)
+    .select();
+
+  if (error) {
+    throw error;
+  }
+
+  return data ?? [];
 }
 
 async function insertDuplicateCandidates(
@@ -1012,6 +1142,430 @@ function countCompatiblePersonDuplicateTargets(candidateEntity: ExistingEntity, 
   ).length;
 }
 
+function buildContradictionEvidence({
+  knownEntities,
+  memoriesToInsert,
+  observations
+}: {
+  knownEntities: ExistingEntity[];
+  memoriesToInsert: Array<{
+    content: string;
+    entity_id: string | null;
+    observation_id: string;
+  }>;
+  observations: Observation[];
+}) {
+  const evidenceByKey = new Map<string, ContradictionEvidence>();
+
+  for (const memory of memoriesToInsert) {
+    addContradictionEvidence(evidenceByKey, {
+      content: memory.content,
+      entityId: memory.entity_id,
+      observationId: memory.observation_id
+    });
+  }
+
+  for (const observation of observations) {
+    if (!isStrongEnoughForContradiction(observation.confidence)) {
+      continue;
+    }
+
+    const referencedEntity = findSingleReferencedEntity(observation.content, knownEntities);
+
+    if (!referencedEntity) {
+      continue;
+    }
+
+    addContradictionEvidence(evidenceByKey, {
+      content: observation.content,
+      entityId: referencedEntity.id,
+      observationId: observation.id
+    });
+  }
+
+  return [...evidenceByKey.values()];
+}
+
+function addContradictionEvidence(
+  evidenceByKey: Map<string, ContradictionEvidence>,
+  evidence: ContradictionEvidence
+) {
+  if (!extractContradictionFacts(evidence.content).length) {
+    return;
+  }
+
+  evidenceByKey.set(`${evidence.observationId ?? "none"}:${evidence.entityId ?? "none"}:${normalizeFactValue(evidence.content)}`, evidence);
+}
+
+function buildMemoryContradictions({
+  evidence,
+  existingEntities,
+  existingMemories,
+  userId
+}: {
+  evidence: ContradictionEvidence[];
+  existingEntities: ExistingEntity[];
+  existingMemories: ExistingMemory[];
+  userId: string;
+}) {
+  const contradictionsByKey = new Map<string, MemoryContradiction>();
+  const confirmedEntities = existingEntities
+    .filter((entity) => ["active", "confirmed"].includes(entity.status))
+    .filter((entity) => isStrongEnoughForContradiction(entity.confidence))
+    .filter((entity) => typeof entity.description === "string" && entity.description.trim().length > 0);
+
+  for (const newEvidence of evidence) {
+    const newFacts = extractContradictionFacts(newEvidence.content);
+
+    if (newFacts.length === 0) {
+      continue;
+    }
+
+    for (const existingMemory of existingMemories) {
+      if (!isComparableContradictionTarget(newEvidence, existingMemory.entity_id)) {
+        continue;
+      }
+
+      addContradictionsForExistingContent({
+        contradictionsByKey,
+        existingContent: existingMemory.content,
+        existingEntityId: existingMemory.entity_id,
+        existingMemoryId: existingMemory.id,
+        existingRecordType: "memory",
+        newEvidence,
+        newFacts,
+        userId
+      });
+    }
+
+    for (const existingEntity of confirmedEntities) {
+      if (!isComparableContradictionTarget(newEvidence, existingEntity.id)) {
+        continue;
+      }
+
+      addContradictionsForExistingContent({
+        contradictionsByKey,
+        existingContent: existingEntity.description ?? "",
+        existingEntityId: existingEntity.id,
+        existingMemoryId: null,
+        existingRecordType: "entity",
+        newEvidence,
+        newFacts,
+        userId
+      });
+    }
+  }
+
+  return [...contradictionsByKey.values()];
+}
+
+function addContradictionsForExistingContent({
+  contradictionsByKey,
+  existingContent,
+  existingEntityId,
+  existingMemoryId,
+  existingRecordType,
+  newEvidence,
+  newFacts,
+  userId
+}: {
+  contradictionsByKey: Map<string, MemoryContradiction>;
+  existingContent: string;
+  existingEntityId: string | null;
+  existingMemoryId: string | null;
+  existingRecordType: "entity" | "memory";
+  newEvidence: ContradictionEvidence;
+  newFacts: ContradictionFact[];
+  userId: string;
+}) {
+  const existingFacts = extractContradictionFacts(existingContent);
+
+  for (const newFact of newFacts) {
+    for (const existingFact of existingFacts) {
+      if (!factsContradict(existingFact, newFact)) {
+        continue;
+      }
+
+      const contradiction: MemoryContradiction = {
+        confidence: newFact.type === "project_status" || newFact.type === "role" ? "high" : "medium",
+        contradiction_type: newFact.type,
+        entity_id: existingEntityId,
+        existing_content: existingContent,
+        existing_record_type: existingRecordType,
+        memory_id: existingMemoryId,
+        new_content: newEvidence.content,
+        observation_id: newEvidence.observationId,
+        reason: buildContradictionReason(existingFact, newFact),
+        resolution_status: "unresolved",
+        status: "suggested",
+        user_id: userId
+      };
+
+      contradictionsByKey.set(buildContradictionKey(contradiction), contradiction);
+    }
+  }
+}
+
+function isComparableContradictionTarget(evidence: ContradictionEvidence, existingEntityId: string | null) {
+  return evidence.entityId !== null && existingEntityId !== null && evidence.entityId === existingEntityId;
+}
+
+function factsContradict(existingFact: ContradictionFact, newFact: ContradictionFact) {
+  if (existingFact.type !== newFact.type) {
+    return false;
+  }
+
+  if (!subjectsAreCompatible(existingFact.subject, newFact.subject)) {
+    return false;
+  }
+
+  if (normalizeFactValue(existingFact.value) === normalizeFactValue(newFact.value)) {
+    return false;
+  }
+
+  if (valuesLookLikeAddedDetail(existingFact.value, newFact.value)) {
+    return false;
+  }
+
+  if (existingFact.type === "role") {
+    return rolesConflict(existingFact.value, newFact.value);
+  }
+
+  if (existingFact.type === "project_status") {
+    return projectStatusesConflict(existingFact.value, newFact.value);
+  }
+
+  return true;
+}
+
+function extractContradictionFacts(content: string) {
+  const facts: ContradictionFact[] = [];
+  const clauses = content
+    .split(/[.;\n]+/)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+
+  for (const clause of clauses) {
+    facts.push(...extractOrganizationFacts(clause));
+    facts.push(...extractRoleFacts(clause));
+    facts.push(...extractDateFacts(clause));
+    facts.push(...extractProjectStatusFacts(clause));
+    facts.push(...extractLocationFacts(clause));
+  }
+
+  return facts;
+}
+
+function extractOrganizationFacts(clause: string): ContradictionFact[] {
+  const facts: ContradictionFact[] = [];
+  const organizationPatterns = [
+    /\b(?<subject>[A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,2})\s+(?:works|is working)\s+(?:at|for)\s+(?<value>[^,.;]+)\b/gu
+  ];
+
+  for (const pattern of organizationPatterns) {
+    for (const match of clause.matchAll(pattern)) {
+      const value = cleanExtractedValue(match.groups?.value ?? "");
+
+      if (value) {
+        facts.push({
+          raw: match[0],
+          subject: match.groups?.subject ?? null,
+          type: "organization",
+          value
+        });
+      }
+    }
+  }
+
+  return facts;
+}
+
+function extractRoleFacts(clause: string): ContradictionFact[] {
+  const facts: ContradictionFact[] = [];
+  const pattern = /\b(?<subject>[A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,2})\s+(?:is|becomes|became)\s+(?:a|an|the|our|my)?\s*(?<value>client|supplier|vendor|customer|partner|colleague|friend|manager|employee|contractor)\b/gu;
+
+  for (const match of clause.matchAll(pattern)) {
+    facts.push({
+      raw: match[0],
+      subject: match.groups?.subject ?? null,
+      type: "role",
+      value: match.groups?.value ?? ""
+    });
+  }
+
+  return facts;
+}
+
+function extractDateFacts(clause: string): ContradictionFact[] {
+  if (!/\b(meeting|call|appointment|deadline|event|trip|session|workshop|presentation)\b/i.test(clause)) {
+    return [];
+  }
+
+  const facts: ContradictionFact[] = [];
+  const pattern = /\b(?:is|on|for|scheduled for|planned for|moved to|rescheduled to)\s+(?<value>monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|\d{4}-\d{2}-\d{2})\b/giu;
+
+  for (const match of clause.matchAll(pattern)) {
+    facts.push({
+      raw: match[0],
+      subject: extractLeadingSubject(clause, match.index ?? 0),
+      type: "date",
+      value: match.groups?.value ?? ""
+    });
+  }
+
+  return facts;
+}
+
+function extractProjectStatusFacts(clause: string): ContradictionFact[] {
+  const facts: ContradictionFact[] = [];
+  const pattern = /\b(?<subject>[A-Z][\p{L}\p{N}'-]+(?:\s+[A-Z][\p{L}\p{N}'-]+){0,4}|project)\s+(?:is|was|became|becomes|looks)\s+(?<value>active|completed|complete|cancelled|canceled|paused|blocked|done)\b/gu;
+
+  for (const match of clause.matchAll(pattern)) {
+    facts.push({
+      raw: match[0],
+      subject: match.groups?.subject ?? null,
+      type: "project_status",
+      value: canonicalProjectStatus(match.groups?.value ?? "")
+    });
+  }
+
+  return facts;
+}
+
+function extractLocationFacts(clause: string): ContradictionFact[] {
+  const facts: ContradictionFact[] = [];
+  const pattern = /\b(?<subject>[A-Z][\p{L}'-]+(?:\s+[A-Z][\p{L}'-]+){0,2})\s+(?:lives in|is based in|is located in|is from)\s+(?<value>[^,.;]+)\b/gu;
+
+  for (const match of clause.matchAll(pattern)) {
+    const value = cleanExtractedValue(match.groups?.value ?? "");
+
+    if (value) {
+      facts.push({
+        raw: match[0],
+        subject: match.groups?.subject ?? null,
+        type: "location",
+        value
+      });
+    }
+  }
+
+  return facts;
+}
+
+function findSingleReferencedEntity(content: string, entities: ExistingEntity[]) {
+  const matchingEntities = entities
+    .filter((entity) => ["active", "confirmed"].includes(entity.status))
+    .filter((entity) => isStrongEnoughForContradiction(entity.confidence))
+    .filter((entity) => contentReferencesEntity(content, entity, entities));
+
+  return matchingEntities.length === 1 ? matchingEntities[0] : null;
+}
+
+function contentReferencesEntity(content: string, entity: ExistingEntity, allEntities: ExistingEntity[]) {
+  const normalizedContent = normalizeFactValue(content);
+  const normalizedName = normalizeFactValue(entity.name);
+
+  if (!normalizedName) {
+    return false;
+  }
+
+  if (normalizedContent.includes(normalizedName)) {
+    return true;
+  }
+
+  if (entity.type !== "person") {
+    return false;
+  }
+
+  const nameParts = getNormalizedNameParts(entity.name);
+
+  if (nameParts.length === 0) {
+    return false;
+  }
+
+  const firstName = nameParts[0];
+  const firstNamePattern = new RegExp(`\\b${escapeRegExp(firstName)}\\b`, "i");
+
+  return firstNamePattern.test(normalizedContent) &&
+    entitiesWithFirstName(firstName, allEntities).length === 1;
+}
+
+function entitiesWithFirstName(firstName: string, entities: ExistingEntity[]) {
+  return entities.filter((entity) =>
+    entity.type === "person" &&
+    getNormalizedNameParts(entity.name)[0] === firstName
+  );
+}
+
+function isStrongEnoughForContradiction(confidence: StoredConfidence) {
+  return confidence === "high" || confidence === "confirmed";
+}
+
+function subjectsAreCompatible(left: string | null, right: string | null) {
+  if (!left || !right) {
+    return true;
+  }
+
+  const normalizedLeft = normalizeFactValue(left);
+  const normalizedRight = normalizeFactValue(right);
+
+  return normalizedLeft === normalizedRight ||
+    normalizedLeft.includes(normalizedRight) ||
+    normalizedRight.includes(normalizedLeft);
+}
+
+function valuesLookLikeAddedDetail(left: string, right: string) {
+  const leftTokens = getFactTokens(left);
+  const rightTokens = getFactTokens(right);
+
+  if (leftTokens.length === 0 || rightTokens.length === 0) {
+    return false;
+  }
+
+  return leftTokens.every((token) => rightTokens.includes(token)) ||
+    rightTokens.every((token) => leftTokens.includes(token));
+}
+
+function rolesConflict(left: string, right: string) {
+  const normalizedLeft = normalizeRole(left);
+  const normalizedRight = normalizeRole(right);
+
+  if (normalizedLeft === normalizedRight) {
+    return false;
+  }
+
+  const mutuallyExclusiveRoles = new Set([
+    "client:supplier",
+    "client:vendor",
+    "customer:supplier",
+    "customer:vendor",
+    "employee:manager"
+  ]);
+  const pairKey = [normalizedLeft, normalizedRight].sort().join(":");
+
+  return mutuallyExclusiveRoles.has(pairKey);
+}
+
+function projectStatusesConflict(left: string, right: string) {
+  const normalizedLeft = canonicalProjectStatus(left);
+  const normalizedRight = canonicalProjectStatus(right);
+
+  if (normalizedLeft === normalizedRight) {
+    return false;
+  }
+
+  const terminalStatuses = new Set(["cancelled", "completed"]);
+
+  return normalizedLeft === "active" && terminalStatuses.has(normalizedRight) ||
+    normalizedRight === "active" && terminalStatuses.has(normalizedLeft) ||
+    normalizedLeft === "cancelled" && normalizedRight === "completed" ||
+    normalizedRight === "cancelled" && normalizedLeft === "completed";
+}
+
+function buildContradictionReason(existingFact: ContradictionFact, newFact: ContradictionFact) {
+  return `${existingFact.type} conflict: existing "${existingFact.value}" vs new "${newFact.value}".`;
+}
+
 function resolveMemoryEntity(
   memory: AiMemory,
   existingEntities: ExistingEntity[],
@@ -1259,8 +1813,85 @@ function compareDuplicateConfidence(left: DuplicateCandidate["confidence"], righ
   return confidenceScore[left] - confidenceScore[right];
 }
 
+function buildContradictionKey(
+  contradiction: Pick<
+    MemoryContradiction,
+    "contradiction_type" | "entity_id" | "existing_content" | "memory_id" | "new_content" | "observation_id"
+  >
+) {
+  return [
+    contradiction.observation_id ?? "none",
+    contradiction.entity_id ?? "none",
+    contradiction.memory_id ?? "none",
+    contradiction.contradiction_type,
+    normalizeFactValue(contradiction.existing_content),
+    normalizeFactValue(contradiction.new_content)
+  ].join(":");
+}
+
 function buildMemoryKey(observationId: string | null, content: string) {
   return `${observationId ?? "none"}:${content.trim().toLocaleLowerCase()}`;
+}
+
+function cleanExtractedValue(value: string) {
+  return value
+    .replace(/\b(?:today|tomorrow|yesterday|now|currently|recently)$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractLeadingSubject(clause: string, matchIndex: number) {
+  const leadingText = clause.slice(0, matchIndex).trim();
+  const subjectMatch = leadingText.match(/\b([A-Z][\p{L}\p{N}'-]+(?:\s+[A-Z][\p{L}\p{N}'-]+){0,4}|meeting|call|appointment|deadline|event|trip|session|workshop|presentation)\b/iu);
+
+  return subjectMatch?.[1] ?? null;
+}
+
+function canonicalProjectStatus(value: string) {
+  const normalizedValue = normalizeFactValue(value);
+
+  if (normalizedValue === "complete" || normalizedValue === "done") {
+    return "completed";
+  }
+
+  if (normalizedValue === "canceled") {
+    return "cancelled";
+  }
+
+  return normalizedValue;
+}
+
+function normalizeRole(value: string) {
+  const normalizedValue = normalizeFactValue(value);
+
+  if (normalizedValue === "vendor") {
+    return "supplier";
+  }
+
+  if (normalizedValue === "customer") {
+    return "client";
+  }
+
+  return normalizedValue;
+}
+
+function normalizeFactValue(value: string) {
+  return value
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}\s/-]/gu, "")
+    .replace(/\s+/g, " ");
+}
+
+function getFactTokens(value: string) {
+  return normalizeFactValue(value)
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function hasSensitiveObservation(observations: Observation[]) {
