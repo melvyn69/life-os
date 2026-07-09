@@ -195,12 +195,13 @@ Deno.serve(async (request) => {
 });
 
 async function loadBriefingContext(supabase: LifeOsSupabaseClient, userId: string) {
-  const [entitiesResult, memoriesResult, observationsResult] = await Promise.all([
+  const [entitiesResult, memoriesResult, observationsResult, contradictionsResult] = await Promise.all([
     supabase
       .from("entities")
       .select("id, name, type, description, confidence, sensitivity, updated_at")
       .eq("user_id", userId)
       .eq("status", activeStatus)
+      .in("confidence", ["high", "confirmed"])
       .order("updated_at", { ascending: false })
       .limit(20),
     supabase
@@ -208,6 +209,7 @@ async function loadBriefingContext(supabase: LifeOsSupabaseClient, userId: strin
       .select("id, entity_id, content, type, confidence, sensitivity, updated_at")
       .eq("user_id", userId)
       .eq("status", activeStatus)
+      .in("confidence", ["high", "confirmed"])
       .order("updated_at", { ascending: false })
       .limit(30),
     supabase
@@ -216,16 +218,29 @@ async function loadBriefingContext(supabase: LifeOsSupabaseClient, userId: strin
       .eq("user_id", userId)
       .in("status", recentObservationStatuses)
       .order("created_at", { ascending: false })
-      .limit(20)
+      .limit(20),
+    supabase
+      .from("memory_contradictions")
+      .select("entity_id, memory_id")
+      .eq("user_id", userId)
+      .eq("resolution_status", "unresolved")
+      .in("status", ["suggested", "active"])
   ]);
 
-  if (entitiesResult.error || memoriesResult.error || observationsResult.error) {
+  if (entitiesResult.error || memoriesResult.error || observationsResult.error || contradictionsResult.error) {
     throw new PublicError("Unable to load briefing context right now.", 500);
   }
 
+  const contradictedEntityIds = new Set(
+    (contradictionsResult.data ?? []).flatMap((contradiction) => contradiction.entity_id ? [contradiction.entity_id] : [])
+  );
+  const contradictedMemoryIds = new Set(
+    (contradictionsResult.data ?? []).flatMap((contradiction) => contradiction.memory_id ? [contradiction.memory_id] : [])
+  );
+
   return {
-    entities: (entitiesResult.data ?? []) as ContextEntity[],
-    memories: (memoriesResult.data ?? []) as ContextMemory[],
+    entities: ((entitiesResult.data ?? []) as ContextEntity[]).filter((entity) => !contradictedEntityIds.has(entity.id)),
+    memories: ((memoriesResult.data ?? []) as ContextMemory[]).filter((memory) => !contradictedMemoryIds.has(memory.id)),
     observations: (observationsResult.data ?? []) as ContextObservation[]
   };
 }
