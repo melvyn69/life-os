@@ -61,7 +61,7 @@ export async function archiveMemory(memoryId: string) {
     })
     .eq("id", memoryId)
     .eq("user_id", userId)
-    .eq("status", "suggested")
+    .in("status", ["suggested", "active"])
     .select()
     .single();
 

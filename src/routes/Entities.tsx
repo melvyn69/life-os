@@ -48,6 +48,7 @@ export function Entities() {
       <EntitySection
         emptyDescription="Validated entities will appear here."
         entities={activeEntities}
+        showArchiveActions
         title="Active"
       />
     </section>
@@ -69,10 +70,12 @@ function EntitySection({
   emptyDescription,
   entities,
   showActions = false,
+  showArchiveActions = false,
   title
 }: {
   emptyDescription: string;
   entities: Entity[];
+  showArchiveActions?: boolean;
   showActions?: boolean;
   title: string;
 }) {
@@ -90,7 +93,12 @@ function EntitySection({
       ) : (
         <div className="space-y-3">
           {entities.map((entity) => (
-            <EntityCard entity={entity} key={entity.id} showActions={showActions} />
+            <EntityCard
+              entity={entity}
+              key={entity.id}
+              showActions={showActions}
+              showArchiveActions={showArchiveActions}
+            />
           ))}
         </div>
       )}
@@ -98,11 +106,19 @@ function EntitySection({
   );
 }
 
-function EntityCard({ entity, showActions }: { entity: Entity; showActions: boolean }) {
+function EntityCard({
+  entity,
+  showActions,
+  showArchiveActions
+}: {
+  entity: Entity;
+  showActions: boolean;
+  showArchiveActions: boolean;
+}) {
   return (
     <article className="rounded-lg border border-border bg-card p-4 text-card-foreground shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
           <h4 className="text-base font-semibold leading-6">{entity.name}</h4>
           {entity.description ? (
             <p className="mt-2 text-sm leading-6 text-muted-foreground">{entity.description}</p>
@@ -121,29 +137,33 @@ function EntityCard({ entity, showActions }: { entity: Entity; showActions: bool
         Updated {formatDate(entity.updated_at)}
       </div>
 
-      {showActions ? <EntityActions entityId={entity.id} /> : null}
+      {showActions ? <EntityActions entityId={entity.id} mode="review" /> : null}
+      {showArchiveActions ? <EntityActions entityId={entity.id} mode="archive" /> : null}
     </article>
   );
 }
 
-function EntityActions({ entityId }: { entityId: string }) {
+function EntityActions({ entityId, mode }: { entityId: string; mode: "archive" | "review" }) {
   const validateEntity = useValidateEntity();
   const archiveEntity = useArchiveEntity();
   const isPending = validateEntity.isPending || archiveEntity.isPending;
   const error = validateEntity.error ?? archiveEntity.error;
+  const isReviewMode = mode === "review";
 
   return (
     <div className="mt-4 space-y-2">
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={isPending}
-          onClick={() => validateEntity.mutate(entityId)}
-          type="button"
-        >
-          <Check aria-hidden="true" className="size-4" />
-          Validate
-        </button>
+      <div className={isReviewMode ? "grid grid-cols-2 gap-2" : "grid grid-cols-1 gap-2"}>
+        {isReviewMode ? (
+          <button
+            className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isPending}
+            onClick={() => validateEntity.mutate(entityId)}
+            type="button"
+          >
+            <Check aria-hidden="true" className="size-4" />
+            Validate
+          </button>
+        ) : null}
         <button
           className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
           disabled={isPending}

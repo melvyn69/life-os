@@ -1,11 +1,14 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
+import { AuthRequiredState } from "@/components/common/AuthRequiredState";
+import { useAuthUser } from "@/hooks/useAuthUser";
 import { useCreateCapture } from "@/hooks/useCaptures";
-import { getUserFacingErrorMessage } from "@/lib/errors";
+import { getUserFacingErrorMessage, isAuthRequiredError } from "@/lib/errors";
 
 export function Capture() {
   const [content, setContent] = useState("");
   const [savedMessage, setSavedMessage] = useState("");
+  const authUser = useAuthUser();
   const createCapture = useCreateCapture();
   const trimmedContent = content.trim();
 
@@ -26,14 +29,33 @@ export function Capture() {
     }
   }
 
+  if (authUser.isLoading) {
+    return (
+      <section className="space-y-4">
+        <CaptureHeader />
+        <div className="h-72 animate-pulse rounded-lg border border-border bg-card" />
+      </section>
+    );
+  }
+
+  if (authUser.isError && isAuthRequiredError(authUser.error)) {
+    return <AuthRequiredState title="Sign in to capture" />;
+  }
+
+  if (authUser.isError) {
+    return (
+      <section className="space-y-4">
+        <CaptureHeader />
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm leading-6 text-destructive">
+          Unable to check your session right now.
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="space-y-5">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-normal">Capture</h2>
-        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          Drop a text fragment here. Life OS keeps the original intact.
-        </p>
-      </div>
+      <CaptureHeader />
 
       <form className="space-y-4" onSubmit={handleSubmit}>
         <div className="rounded-lg border border-border bg-card p-4 shadow-sm">
@@ -73,5 +95,16 @@ export function Capture() {
         </button>
       </form>
     </section>
+  );
+}
+
+function CaptureHeader() {
+  return (
+    <div>
+      <h2 className="text-2xl font-semibold tracking-normal">Capture</h2>
+      <p className="mt-2 text-sm leading-6 text-muted-foreground">
+        Drop a text fragment here. Life OS keeps the original intact.
+      </p>
+    </div>
   );
 }

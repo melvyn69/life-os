@@ -126,6 +126,60 @@ export type Database = {
         };
         Relationships: [];
       };
+      entity_duplicate_candidates: {
+        Row: {
+          id: string;
+          user_id: string;
+          entity_id: string | null;
+          duplicate_entity_id: string;
+          candidate_name: string | null;
+          reason: string;
+          confidence: Confidence;
+          status: LifeOsStatus;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          entity_id?: string | null;
+          duplicate_entity_id: string;
+          candidate_name?: string | null;
+          reason: string;
+          confidence?: Confidence;
+          status?: LifeOsStatus;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          entity_id?: string | null;
+          duplicate_entity_id?: string;
+          candidate_name?: string | null;
+          reason?: string;
+          confidence?: Confidence;
+          status?: LifeOsStatus;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "entity_duplicate_candidates_entity_id_fkey";
+            columns: ["entity_id"];
+            isOneToOne: false;
+            referencedRelation: "entities";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "entity_duplicate_candidates_duplicate_entity_id_fkey";
+            columns: ["duplicate_entity_id"];
+            isOneToOne: false;
+            referencedRelation: "entities";
+            referencedColumns: ["id"];
+          }
+        ];
+      };
       memories: {
         Row: {
           id: string;

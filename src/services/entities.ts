@@ -55,7 +55,7 @@ export async function archiveEntity(entityId: string) {
     })
     .eq("id", entityId)
     .eq("user_id", userId)
-    .eq("status", "suggested")
+    .in("status", ["suggested", "active"])
     .select()
     .single();
 

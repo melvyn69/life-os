@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.110.1";
 
+type LifeOsSupabaseClient = ReturnType<typeof createClient<any>>;
 type Confidence = "low" | "medium" | "high";
 type Sensitivity = "normal" | "sensitive";
 type ObservationType = "fact" | "preference" | "event" | "emotion" | "goal" | "relationship" | "other";
@@ -91,7 +92,7 @@ Deno.serve(async (request) => {
     const authorization = request.headers.get("Authorization");
 
     if (!authorization) {
-      return jsonResponse({ error: "Missing authorization header." }, 401);
+      throw new PublicError("Sign in to analyze a capture.", 401);
     }
 
     const supabaseUrl = readEnv("SUPABASE_URL");
@@ -99,7 +100,7 @@ Deno.serve(async (request) => {
     const openAiKey = readEnv("OPENAI_API_KEY");
     const openAiModel = readEnv("OPENAI_MODEL");
 
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    const supabase = createClient<any>(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: {
           Authorization: authorization
@@ -109,15 +110,11 @@ Deno.serve(async (request) => {
 
     const { data: userData, error: userError } = await supabase.auth.getUser();
 
-    if (userError) {
-      throw userError;
+    if (userError || !userData.user) {
+      throw new PublicError("Sign in to analyze a capture.", 401);
     }
 
     const user = userData.user;
-
-    if (!user) {
-      return jsonResponse({ error: "You must be signed in to analyze a capture." }, 401);
-    }
 
     const { data: capture, error: captureError } = await supabase
       .from("captures")
@@ -127,11 +124,11 @@ Deno.serve(async (request) => {
       .single();
 
     if (captureError || !capture) {
-      return jsonResponse({ error: "Capture not found." }, 404);
+      throw new PublicError("Capture not found.", 404);
     }
 
     if (capture.status === "deleted") {
-      return jsonResponse({ error: "Deleted captures cannot be analyzed." }, 400);
+      throw new PublicError("Deleted captures cannot be analyzed.", 400);
     }
 
     const { data: existingObservations, error: existingObservationsError } = await supabase
@@ -174,8 +171,16 @@ Deno.serve(async (request) => {
 
     return jsonResponse({ observations: insertedObservations });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to analyze capture.";
-    return jsonResponse({ error: message }, 400);
+    if (error instanceof PublicError) {
+      return jsonResponse({ error: error.message }, error.status);
+    }
+
+    console.error(
+      "Unexpected capture analysis error.",
+      error instanceof Error ? error.name : typeof error
+    );
+
+    return jsonResponse({ error: "Unable to analyze this capture right now." }, 500);
   }
 });
 
@@ -218,8 +223,7 @@ async function extractObservationsWithOpenAi({
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI request failed: ${errorText}`);
+    throw new Error("OpenAI request failed.");
   }
 
   const completion = await response.json();
@@ -285,7 +289,7 @@ function validateAiObservation(value: unknown): AiObservation {
 }
 
 async function insertObservations(
-  supabase: ReturnType<typeof createClient>,
+  supabase: LifeOsSupabaseClient,
   observations: Array<{
     capture_id: string;
     confidence: Confidence;
@@ -306,7 +310,7 @@ async function insertObservations(
 }
 
 async function markCaptureAnalyzed(
-  supabase: ReturnType<typeof createClient>,
+  supabase: LifeOsSupabaseClient,
   captureId: string,
   userId: string
 ) {
@@ -332,17 +336,17 @@ async function readCaptureId(request: Request) {
   try {
     body = await request.json();
   } catch {
-    throw new Error("Request body must be JSON.");
+    throw new PublicError("Invalid request.", 400);
   }
 
   if (!isRecord(body)) {
-    throw new Error("Request body must be an object.");
+    throw new PublicError("Invalid request.", 400);
   }
 
   const captureId = readString(body.capture_id, "capture_id").trim();
 
   if (!captureId) {
-    throw new Error("capture_id is required.");
+    throw new PublicError("Capture is required.", 400);
   }
 
   return captureId;
@@ -408,4 +412,14 @@ function jsonResponse(body: unknown, status = 200) {
     },
     status
   });
+}
+
+class PublicError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "PublicError";
+    this.status = status;
+  }
 }

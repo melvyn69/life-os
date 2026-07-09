@@ -48,6 +48,7 @@ export function Memory() {
       <MemorySection
         emptyDescription="Validated memories will appear here."
         memories={activeMemories}
+        showArchiveActions
         title="Active"
       />
     </section>
@@ -69,10 +70,12 @@ function MemorySection({
   emptyDescription,
   memories,
   showActions = false,
+  showArchiveActions = false,
   title
 }: {
   emptyDescription: string;
   memories: MemoryWithEntity[];
+  showArchiveActions?: boolean;
   showActions?: boolean;
   title: string;
 }) {
@@ -90,7 +93,12 @@ function MemorySection({
       ) : (
         <div className="space-y-3">
           {memories.map((memory) => (
-            <MemoryCard key={memory.id} memory={memory} showActions={showActions} />
+            <MemoryCard
+              key={memory.id}
+              memory={memory}
+              showActions={showActions}
+              showArchiveActions={showArchiveActions}
+            />
           ))}
         </div>
       )}
@@ -100,15 +108,17 @@ function MemorySection({
 
 function MemoryCard({
   memory,
-  showActions
+  showActions,
+  showArchiveActions
 }: {
   memory: MemoryWithEntity;
   showActions: boolean;
+  showArchiveActions: boolean;
 }) {
   return (
     <article className="rounded-lg border border-border bg-card p-4 text-card-foreground shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <p className="text-sm leading-6">{memory.content}</p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <p className="min-w-0 text-sm leading-6">{memory.content}</p>
         <MemoryStatusBadge label={memory.status} />
       </div>
 
@@ -123,29 +133,33 @@ function MemoryCard({
         Updated {formatDate(memory.updated_at)}
       </div>
 
-      {showActions ? <MemoryActions memoryId={memory.id} /> : null}
+      {showActions ? <MemoryActions memoryId={memory.id} mode="review" /> : null}
+      {showArchiveActions ? <MemoryActions memoryId={memory.id} mode="archive" /> : null}
     </article>
   );
 }
 
-function MemoryActions({ memoryId }: { memoryId: string }) {
+function MemoryActions({ memoryId, mode }: { memoryId: string; mode: "archive" | "review" }) {
   const validateMemory = useValidateMemory();
   const archiveMemory = useArchiveMemory();
   const isPending = validateMemory.isPending || archiveMemory.isPending;
   const error = validateMemory.error ?? archiveMemory.error;
+  const isReviewMode = mode === "review";
 
   return (
     <div className="mt-4 space-y-2">
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={isPending}
-          onClick={() => validateMemory.mutate(memoryId)}
-          type="button"
-        >
-          <Check aria-hidden="true" className="size-4" />
-          Validate
-        </button>
+      <div className={isReviewMode ? "grid grid-cols-2 gap-2" : "grid grid-cols-1 gap-2"}>
+        {isReviewMode ? (
+          <button
+            className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isPending}
+            onClick={() => validateMemory.mutate(memoryId)}
+            type="button"
+          >
+            <Check aria-hidden="true" className="size-4" />
+            Validate
+          </button>
+        ) : null}
         <button
           className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
           disabled={isPending}

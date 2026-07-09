@@ -1,5 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.110.1";
 
+type LifeOsSupabaseClient = ReturnType<typeof createClient<any>>;
 type Confidence = "low" | "medium" | "high";
 type Sensitivity = "normal" | "sensitive";
 type EntityType =
@@ -26,6 +27,28 @@ type ExistingEntity = {
   name: string;
   type: string;
   status: string;
+};
+
+type EntityMatch = {
+  entity: ExistingEntity;
+  confidence: "high";
+  reason: "exact_name" | "unique_person_name_part";
+};
+
+type DuplicateCandidateReason =
+  | "nickname"
+  | "first_name_last_initial"
+  | "unique_first_name"
+  | "similar_distinctive_name";
+
+type DuplicateCandidate = {
+  user_id: string;
+  candidate_name: string | null;
+  entity_id: string | null;
+  duplicate_entity_id: string;
+  reason: DuplicateCandidateReason;
+  confidence: "medium" | "high";
+  status: "suggested";
 };
 
 type AiEntity = {
@@ -66,6 +89,23 @@ const entityTypes = new Set<EntityType>([
 
 const confidenceLevels = new Set<Confidence>(["low", "medium", "high"]);
 const sensitivityLevels = new Set<Sensitivity>(["normal", "sensitive"]);
+const ignoredReferenceStarts = new Set(["a", "an", "i", "need", "notebook", "remember", "the"]);
+const genericNameTokens = new Set([
+  "app",
+  "company",
+  "group",
+  "idea",
+  "inc",
+  "life",
+  "new",
+  "notes",
+  "old",
+  "plan",
+  "project",
+  "team",
+  "the",
+  "work"
+]);
 
 const suggestionSchema = {
   type: "object",
@@ -163,7 +203,7 @@ Deno.serve(async (request) => {
     const authorization = request.headers.get("Authorization");
 
     if (!authorization) {
-      return jsonResponse({ error: "Missing authorization header." }, 401);
+      throw new PublicError("Sign in to suggest memory.", 401);
     }
 
     const supabaseUrl = readEnv("SUPABASE_URL");
@@ -171,7 +211,7 @@ Deno.serve(async (request) => {
     const openAiKey = readEnv("OPENAI_API_KEY");
     const openAiModel = readEnv("OPENAI_MODEL");
 
-    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    const supabase = createClient<any>(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: {
           Authorization: authorization
@@ -181,15 +221,11 @@ Deno.serve(async (request) => {
 
     const { data: userData, error: userError } = await supabase.auth.getUser();
 
-    if (userError) {
-      throw userError;
+    if (userError || !userData.user) {
+      throw new PublicError("Sign in to suggest memory.", 401);
     }
 
     const user = userData.user;
-
-    if (!user) {
-      return jsonResponse({ error: "You must be signed in to process observations." }, 401);
-    }
 
     const { data: capture, error: captureError } = await supabase
       .from("captures")
@@ -199,11 +235,11 @@ Deno.serve(async (request) => {
       .single();
 
     if (captureError || !capture) {
-      return jsonResponse({ error: "Capture not found." }, 404);
+      throw new PublicError("Capture not found.", 404);
     }
 
     if (capture.status === "deleted") {
-      return jsonResponse({ error: "Deleted captures cannot be processed." }, 400);
+      throw new PublicError("Deleted captures cannot be processed.", 400);
     }
 
     const { data: observations, error: observationsError } = await supabase
@@ -250,38 +286,79 @@ Deno.serve(async (request) => {
     const observationById = new Map(
       suggestedObservations.map((observation) => [observation.id, observation])
     );
+    const knownEntities = (existingEntities ?? []) as ExistingEntity[];
+    const existingEntityIds = new Set(knownEntities.map((entity) => entity.id));
     const existingEntityByName = new Map(
-      ((existingEntities ?? []) as ExistingEntity[]).map((entity) => [
+      knownEntities.map((entity) => [
         normalizeName(entity.name),
         entity
       ])
     );
+    const entityMatchBySuggestedName = new Map<string, EntityMatch>();
+    const entityNamesToInsert = new Set<string>();
 
     const entitiesToInsert = aiSuggestions.entities
       .filter((entity) => entity.confidence !== "low")
-      .filter((entity) => !existingEntityByName.has(normalizeName(entity.name)))
-      .map((entity) => ({
-        confidence: entity.confidence,
-        description: entity.description,
-        name: entity.name,
-        sensitivity: hasSensitiveObservation(suggestedObservations) ? "sensitive" as const : "normal" as const,
-        status: "suggested" as const,
-        type: entity.type,
-        user_id: user.id
-      }));
+      .flatMap((entity) => {
+        const normalizedEntityName = normalizeName(entity.name);
+        const match = findExistingEntityMatch(entity, knownEntities);
+
+        if (match) {
+          entityMatchBySuggestedName.set(normalizedEntityName, match);
+          existingEntityByName.set(normalizedEntityName, match.entity);
+          return [];
+        }
+
+        if (entityNamesToInsert.has(normalizedEntityName)) {
+          return [];
+        }
+
+        entityNamesToInsert.add(normalizedEntityName);
+
+        return [{
+          confidence: entity.confidence,
+          description: entity.description,
+          name: entity.name,
+          sensitivity: hasSensitiveObservation(suggestedObservations) ? "sensitive" as const : "normal" as const,
+          status: "suggested" as const,
+          type: entity.type,
+          user_id: user.id
+        }];
+      });
 
     const insertedEntities = entitiesToInsert.length > 0
       ? await insertEntities(supabase, entitiesToInsert)
       : [];
 
     for (const entity of insertedEntities) {
-      existingEntityByName.set(normalizeName(entity.name), {
+      const insertedEntity = {
         id: entity.id,
         name: entity.name,
         status: entity.status,
         type: entity.type
+      };
+
+      existingEntityByName.set(normalizeName(entity.name), {
+        ...insertedEntity
       });
+      knownEntities.push(insertedEntity);
     }
+
+    const duplicateCandidates = [
+      ...buildDuplicateCandidates({
+        allEntities: knownEntities,
+        candidateEntities: knownEntities.filter((entity) => !existingEntityIds.has(entity.id)),
+        userId: user.id
+      }),
+      ...buildReferenceDuplicateCandidates({
+        existingEntities: knownEntities.filter((entity) => existingEntityIds.has(entity.id)),
+        observations: suggestedObservations,
+        userId: user.id
+      })
+    ];
+    const insertedDuplicateCandidates = duplicateCandidates.length > 0
+      ? await insertDuplicateCandidates(supabase, user.id, duplicateCandidates)
+      : [];
 
     const existingMemories = await listExistingSuggestedMemoriesForObservations(
       supabase,
@@ -296,7 +373,7 @@ Deno.serve(async (request) => {
       .filter((memory) => observationIds.has(memory.source_observation_id))
       .filter((memory) => !existingMemoryKeys.has(buildMemoryKey(memory.source_observation_id, memory.content)))
       .map((memory) => {
-        const matchingEntity = existingEntityByName.get(normalizeName(memory.entity_name));
+        const matchingEntity = resolveMemoryEntity(memory, knownEntities, existingEntityByName, entityMatchBySuggestedName);
         const sourceObservation = observationById.get(memory.source_observation_id);
 
         return {
@@ -318,13 +395,22 @@ Deno.serve(async (request) => {
       : [];
 
     return jsonResponse({
+      duplicate_candidates: insertedDuplicateCandidates,
       entities: insertedEntities,
       memories: insertedMemories,
       prompt_version: promptVersion
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to process observations.";
-    return jsonResponse({ error: message }, 400);
+    if (error instanceof PublicError) {
+      return jsonResponse({ error: error.message }, error.status);
+    }
+
+    console.error(
+      "Unexpected observation processing error.",
+      error instanceof Error ? error.name : typeof error
+    );
+
+    return jsonResponse({ error: "Unable to suggest memory right now." }, 500);
   }
 });
 
@@ -388,8 +474,7 @@ async function suggestEntitiesAndMemoriesWithOpenAi({
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI request failed: ${errorText}`);
+    throw new Error("OpenAI request failed.");
   }
 
   const completion = await response.json();
@@ -409,7 +494,6 @@ async function suggestEntitiesAndMemoriesWithOpenAi({
 
   return validateAiSuggestionPayload(parsed, new Set(observations.map((observation) => observation.id)));
 }
-
 function validateAiSuggestionPayload(payload: unknown, observationIds: Set<string>) {
   if (!isRecord(payload)) {
     throw new Error("AI response must be an object.");
@@ -505,7 +589,7 @@ function validateAiMemory(value: unknown, observationIds: Set<string>): AiMemory
 }
 
 async function insertEntities(
-  supabase: ReturnType<typeof createClient>,
+  supabase: LifeOsSupabaseClient,
   entities: Array<{
     confidence: Confidence;
     description: string;
@@ -526,7 +610,7 @@ async function insertEntities(
 }
 
 async function insertMemories(
-  supabase: ReturnType<typeof createClient>,
+  supabase: LifeOsSupabaseClient,
   memories: Array<{
     confidence: Confidence;
     content: string;
@@ -548,7 +632,7 @@ async function insertMemories(
 }
 
 async function listExistingSuggestedMemoriesForObservations(
-  supabase: ReturnType<typeof createClient>,
+  supabase: LifeOsSupabaseClient,
   userId: string,
   observationIds: string[]
 ) {
@@ -570,23 +654,468 @@ async function listExistingSuggestedMemoriesForObservations(
   return (data ?? []) as Array<{ observation_id: string | null; content: string }>;
 }
 
+async function insertDuplicateCandidates(
+  supabase: LifeOsSupabaseClient,
+  userId: string,
+  candidates: DuplicateCandidate[]
+) {
+  const { data: existingCandidates, error: existingCandidatesError } = await supabase
+    .from("entity_duplicate_candidates")
+    .select("entity_id, candidate_name, duplicate_entity_id")
+    .eq("user_id", userId)
+    .in("status", ["suggested", "active", "confirmed"]);
+
+  if (existingCandidatesError) {
+    throw existingCandidatesError;
+  }
+
+  const existingCandidateKeys = new Set(
+    (existingCandidates ?? []).map((candidate) =>
+      buildDuplicateCandidateKey(candidate as Pick<DuplicateCandidate, "candidate_name" | "duplicate_entity_id" | "entity_id">)
+    )
+  );
+  const candidatesToInsert = candidates.filter((candidate) => {
+    const candidateKey = buildDuplicateCandidateKey(candidate);
+
+    if (existingCandidateKeys.has(candidateKey)) {
+      return false;
+    }
+
+    existingCandidateKeys.add(candidateKey);
+    return true;
+  });
+
+  if (candidatesToInsert.length === 0) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("entity_duplicate_candidates")
+    .insert(candidatesToInsert)
+    .select();
+
+  if (error) {
+    throw error;
+  }
+
+  return data ?? [];
+}
+
+function buildDuplicateCandidates({
+  allEntities,
+  candidateEntities,
+  userId
+}: {
+  allEntities: ExistingEntity[];
+  candidateEntities: ExistingEntity[];
+  userId: string;
+}) {
+  const candidatesByPair = new Map<string, DuplicateCandidate>();
+
+  for (const candidateEntity of candidateEntities) {
+    for (const comparisonEntity of allEntities) {
+      if (candidateEntity.id === comparisonEntity.id) {
+        continue;
+      }
+
+      const duplicateSignal = findDuplicateSignal(candidateEntity, comparisonEntity);
+
+      if (!duplicateSignal) {
+        continue;
+      }
+
+      if (
+        candidateEntity.type === "person" &&
+        countCompatiblePersonDuplicateTargets(candidateEntity, allEntities) !== 1
+      ) {
+        continue;
+      }
+
+      const [entityId, duplicateEntityId] = sortEntityPair(candidateEntity.id, comparisonEntity.id);
+      const pairKey = `${entityId}:${duplicateEntityId}`;
+      const existingCandidate = candidatesByPair.get(pairKey);
+
+      if (existingCandidate && compareDuplicateConfidence(existingCandidate.confidence, duplicateSignal.confidence) >= 0) {
+        continue;
+      }
+
+      candidatesByPair.set(pairKey, {
+        candidate_name: null,
+        confidence: duplicateSignal.confidence,
+        duplicate_entity_id: duplicateEntityId,
+        entity_id: entityId,
+        reason: duplicateSignal.reason,
+        status: "suggested",
+        user_id: userId
+      });
+    }
+  }
+
+  return [...candidatesByPair.values()];
+}
+
+function buildReferenceDuplicateCandidates({
+  existingEntities,
+  observations,
+  userId
+}: {
+  existingEntities: ExistingEntity[];
+  observations: Observation[];
+  userId: string;
+}) {
+  const candidatesByKey = new Map<string, DuplicateCandidate>();
+  const existingPeople = existingEntities.filter((entity) => entity.type === "person");
+  const existingNamedThings = existingEntities.filter((entity) => entity.type !== "person");
+
+  for (const candidateName of extractPossiblePersonReferences(observations)) {
+    const compatiblePeople = existingPeople
+      .map((entity) => ({
+        entity,
+        signal: findPersonDuplicateSignal(candidateName, entity.name)
+      }))
+      .filter((match): match is {
+        entity: ExistingEntity;
+        signal: Pick<DuplicateCandidate, "confidence" | "reason">;
+      } => match.signal !== null);
+
+    if (compatiblePeople.length !== 1) {
+      continue;
+    }
+
+    const compatiblePerson = compatiblePeople[0];
+    const candidate: DuplicateCandidate = {
+      candidate_name: candidateName,
+      confidence: compatiblePerson.signal.confidence,
+      duplicate_entity_id: compatiblePerson.entity.id,
+      entity_id: null,
+      reason: compatiblePerson.signal.reason,
+      status: "suggested",
+      user_id: userId
+    };
+
+    candidatesByKey.set(buildDuplicateCandidateKey(candidate), candidate);
+  }
+
+  for (const candidateName of extractPossibleNamedThingReferences(observations, existingNamedThings)) {
+    const compatibleNamedThings = existingNamedThings
+      .map((entity) => ({
+        entity,
+        signal: findNamedThingDuplicateSignal(candidateName, entity.name)
+      }))
+      .filter((match): match is {
+        entity: ExistingEntity;
+        signal: Pick<DuplicateCandidate, "confidence" | "reason">;
+      } => match.signal !== null)
+      .filter((match) => isSafeNamedThingReference(candidateName, match.entity.name));
+
+    if (compatibleNamedThings.length !== 1) {
+      continue;
+    }
+
+    const compatibleNamedThing = compatibleNamedThings[0];
+    const candidate: DuplicateCandidate = {
+      candidate_name: candidateName,
+      confidence: compatibleNamedThing.signal.confidence,
+      duplicate_entity_id: compatibleNamedThing.entity.id,
+      entity_id: null,
+      reason: compatibleNamedThing.signal.reason,
+      status: "suggested",
+      user_id: userId
+    };
+
+    candidatesByKey.set(buildDuplicateCandidateKey(candidate), candidate);
+  }
+
+  return [...candidatesByKey.values()];
+}
+
+function extractPossiblePersonReferences(observations: Observation[]) {
+  const references = new Set<string>();
+  const referencePattern = /\b[A-Z][a-z]+(?:\s+[A-Z]\.)?/g;
+
+  for (const observation of observations) {
+    for (const match of observation.content.matchAll(referencePattern)) {
+      const reference = match[0].trim();
+
+      if (ignoredReferenceStarts.has(normalizeName(reference))) {
+        continue;
+      }
+
+      references.add(reference);
+    }
+  }
+
+  return [...references];
+}
+
+function extractPossibleNamedThingReferences(observations: Observation[], existingEntities: ExistingEntity[]) {
+  const references = new Set<string>();
+  const distinctiveTokens = new Set(existingEntities.flatMap((entity) => getDistinctiveNameTokens(entity.name)));
+
+  if (distinctiveTokens.size === 0) {
+    return [];
+  }
+
+  for (const observation of observations) {
+    const words = observation.content
+      .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter(Boolean);
+
+    for (let start = 0; start < words.length; start += 1) {
+      for (let length = 2; length <= 4 && start + length <= words.length; length += 1) {
+        const phrase = stripLeadingNameArticles(words.slice(start, start + length).join(" "));
+        const normalizedPhraseParts = getNormalizedNameParts(phrase);
+
+        if (!normalizedPhraseParts.some((part) => distinctiveTokens.has(part))) {
+          continue;
+        }
+
+        if (!normalizedPhraseParts.every((part) => distinctiveTokens.has(part) || genericNameTokens.has(part))) {
+          continue;
+        }
+
+        references.add(phrase);
+      }
+    }
+  }
+
+  return pruneContainedNameReferences([...references]);
+}
+
+function findDuplicateSignal(
+  candidateEntity: ExistingEntity,
+  comparisonEntity: ExistingEntity
+): Pick<DuplicateCandidate, "confidence" | "reason"> | null {
+  if (candidateEntity.type !== comparisonEntity.type) {
+    return null;
+  }
+
+  if (candidateEntity.type === "person") {
+    return findPersonDuplicateSignal(candidateEntity.name, comparisonEntity.name);
+  }
+
+  return findNamedThingDuplicateSignal(candidateEntity.name, comparisonEntity.name);
+}
+
+function findPersonDuplicateSignal(
+  candidateName: string,
+  comparisonName: string
+): Pick<DuplicateCandidate, "confidence" | "reason"> | null {
+  const candidateParts = getNormalizedNameParts(candidateName);
+  const comparisonParts = getNormalizedNameParts(comparisonName);
+
+  if (candidateParts.length === 0 || comparisonParts.length === 0) {
+    return null;
+  }
+
+  if (areKnownNicknameVariants(candidateParts[0], comparisonParts[0])) {
+    return {
+      confidence: "medium",
+      reason: "nickname"
+    };
+  }
+
+  if (hasFirstNameAndLastInitialMatch(candidateParts, comparisonParts)) {
+    return {
+      confidence: "high",
+      reason: "first_name_last_initial"
+    };
+  }
+
+  if (candidateParts.length === 1 && comparisonParts.length > 1 && candidateParts[0] === comparisonParts[0]) {
+    return {
+      confidence: "medium",
+      reason: "unique_first_name"
+    };
+  }
+
+  if (comparisonParts.length === 1 && candidateParts.length > 1 && candidateParts[0] === comparisonParts[0]) {
+    return {
+      confidence: "medium",
+      reason: "unique_first_name"
+    };
+  }
+
+  return null;
+}
+
+function findNamedThingDuplicateSignal(
+  candidateName: string,
+  comparisonName: string
+): Pick<DuplicateCandidate, "confidence" | "reason"> | null {
+  const candidateTokens = getDistinctiveNameTokens(candidateName);
+  const comparisonTokens = getDistinctiveNameTokens(comparisonName);
+
+  if (candidateTokens.length === 0 || comparisonTokens.length === 0) {
+    return null;
+  }
+
+  const smallerTokenSet = candidateTokens.length <= comparisonTokens.length
+    ? candidateTokens
+    : comparisonTokens;
+  const largerTokenSet = candidateTokens.length <= comparisonTokens.length
+    ? comparisonTokens
+    : candidateTokens;
+
+  if (smallerTokenSet.every((token) => largerTokenSet.includes(token))) {
+    return {
+      confidence: "medium",
+      reason: "similar_distinctive_name"
+    };
+  }
+
+  return null;
+}
+
+function isSafeNamedThingReference(candidateName: string, comparisonName: string) {
+  const candidateParts = getNormalizedNameParts(candidateName);
+  const comparisonParts = getNormalizedNameParts(comparisonName);
+
+  if (candidateParts.length === 0 || comparisonParts.length === 0) {
+    return false;
+  }
+
+  if (normalizeName(candidateName) === normalizeName(comparisonName)) {
+    return false;
+  }
+
+  return candidateParts.every((part) => comparisonParts.includes(part) || genericNameTokens.has(part));
+}
+
+function stripLeadingNameArticles(value: string) {
+  return value.replace(/^(?:a|an|the)\s+/i, "").trim();
+}
+
+function pruneContainedNameReferences(references: string[]) {
+  return references.filter((reference) => {
+    const normalizedReference = normalizeName(reference);
+
+    return !references.some((otherReference) => {
+      if (otherReference === reference) {
+        return false;
+      }
+
+      const normalizedOtherReference = normalizeName(otherReference);
+      return normalizedOtherReference.length > normalizedReference.length &&
+        normalizedOtherReference.includes(normalizedReference);
+    });
+  });
+}
+
+function countCompatiblePersonDuplicateTargets(candidateEntity: ExistingEntity, allEntities: ExistingEntity[]) {
+  return allEntities.filter((comparisonEntity) =>
+    candidateEntity.id !== comparisonEntity.id &&
+    comparisonEntity.type === "person" &&
+    findPersonDuplicateSignal(candidateEntity.name, comparisonEntity.name) !== null
+  ).length;
+}
+
+function resolveMemoryEntity(
+  memory: AiMemory,
+  existingEntities: ExistingEntity[],
+  existingEntityByName: Map<string, ExistingEntity>,
+  entityMatchBySuggestedName: Map<string, EntityMatch>
+) {
+  const normalizedEntityName = normalizeName(memory.entity_name);
+
+  if (!normalizedEntityName) {
+    return null;
+  }
+
+  const existingEntity = existingEntityByName.get(normalizedEntityName);
+
+  if (existingEntity) {
+    return existingEntity;
+  }
+
+  const suggestedEntityMatch = entityMatchBySuggestedName.get(normalizedEntityName);
+
+  if (suggestedEntityMatch) {
+    return suggestedEntityMatch.entity;
+  }
+
+  if (memory.confidence !== "high") {
+    return null;
+  }
+
+  const match = findExistingEntityMatch(
+    {
+      confidence: memory.confidence,
+      description: "",
+      importance: 1,
+      name: memory.entity_name,
+      type: "person"
+    },
+    existingEntities
+  );
+
+  return match?.entity ?? null;
+}
+
+function findExistingEntityMatch(entity: AiEntity, existingEntities: ExistingEntity[]): EntityMatch | null {
+  const normalizedName = normalizeName(entity.name);
+
+  if (!normalizedName) {
+    return null;
+  }
+
+  const exactMatch = existingEntities.find((existingEntity) =>
+    normalizeName(existingEntity.name) === normalizedName
+  );
+
+  if (exactMatch) {
+    return {
+      confidence: "high",
+      entity: exactMatch,
+      reason: "exact_name"
+    };
+  }
+
+  if (entity.confidence !== "high" || entity.type !== "person") {
+    return null;
+  }
+
+  const suggestedNameParts = getNormalizedNameParts(entity.name);
+
+  if (suggestedNameParts.length !== 1) {
+    return null;
+  }
+
+  const matchingPeople = existingEntities.filter((existingEntity) =>
+    existingEntity.type === "person" &&
+    getNormalizedNameParts(existingEntity.name)[0] === suggestedNameParts[0]
+  );
+
+  if (matchingPeople.length !== 1) {
+    return null;
+  }
+
+  return {
+    confidence: "high",
+    entity: matchingPeople[0],
+    reason: "unique_person_name_part"
+  };
+}
+
 async function readCaptureId(request: Request) {
   let body: unknown;
 
   try {
     body = await request.json();
   } catch {
-    throw new Error("Request body must be JSON.");
+    throw new PublicError("Invalid request.", 400);
   }
 
   if (!isRecord(body)) {
-    throw new Error("Request body must be an object.");
+    throw new PublicError("Invalid request.", 400);
   }
 
   const captureId = readString(body.capture_id, "capture_id").trim();
 
   if (!captureId) {
-    throw new Error("capture_id is required.");
+    throw new PublicError("Capture is required.", 400);
   }
 
   return captureId;
@@ -656,6 +1185,80 @@ function normalizeName(value: string) {
   return value.trim().toLocaleLowerCase();
 }
 
+function getNormalizedNameParts(value: string) {
+  return normalizeName(value)
+    .replace(/\./g, " ")
+    .split(/[\s'-]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function getDistinctiveNameTokens(value: string) {
+  return [...new Set(
+    getNormalizedNameParts(value)
+      .filter((part) => part.length >= 4)
+      .filter((part) => !genericNameTokens.has(part))
+  )];
+}
+
+function hasFirstNameAndLastInitialMatch(candidateParts: string[], comparisonParts: string[]) {
+  if (candidateParts.length !== 2 || comparisonParts.length < 2) {
+    return false;
+  }
+
+  if (candidateParts[0] !== comparisonParts[0]) {
+    return false;
+  }
+
+  return candidateParts[1].length === 1 && comparisonParts[1].startsWith(candidateParts[1]);
+}
+
+function areKnownNicknameVariants(left: string, right: string) {
+  if (left === right) {
+    return false;
+  }
+
+  const nicknameGroups = [
+    ["tom", "thomas"],
+    ["alex", "alexander", "alexandre", "alexandra"],
+    ["ben", "benjamin"],
+    ["cam", "camille"],
+    ["chris", "christopher", "christophe", "christine"],
+    ["dan", "daniel", "danielle"],
+    ["em", "emma", "emily", "emilie"],
+    ["max", "maxime", "maximilien"],
+    ["mike", "michael", "michel"],
+    ["nick", "nicolas", "nicholas"],
+    ["sam", "samuel", "samantha"],
+    ["will", "william"]
+  ];
+
+  return nicknameGroups.some((group) => group.includes(left) && group.includes(right));
+}
+
+function sortEntityPair(leftEntityId: string, rightEntityId: string) {
+  return leftEntityId < rightEntityId
+    ? [leftEntityId, rightEntityId]
+    : [rightEntityId, leftEntityId];
+}
+
+function buildDuplicateCandidateKey(
+  candidate: Pick<DuplicateCandidate, "candidate_name" | "duplicate_entity_id" | "entity_id">
+) {
+  return candidate.entity_id
+    ? `entity:${candidate.entity_id}:${candidate.duplicate_entity_id}`
+    : `reference:${normalizeName(candidate.candidate_name ?? "")}:${candidate.duplicate_entity_id}`;
+}
+
+function compareDuplicateConfidence(left: DuplicateCandidate["confidence"], right: DuplicateCandidate["confidence"]) {
+  const confidenceScore = {
+    medium: 1,
+    high: 2
+  };
+
+  return confidenceScore[left] - confidenceScore[right];
+}
+
 function buildMemoryKey(observationId: string | null, content: string) {
   return `${observationId ?? "none"}:${content.trim().toLocaleLowerCase()}`;
 }
@@ -676,4 +1279,14 @@ function jsonResponse(body: unknown, status = 200) {
     },
     status
   });
+}
+
+class PublicError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "PublicError";
+    this.status = status;
+  }
 }
