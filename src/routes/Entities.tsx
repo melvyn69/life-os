@@ -1,13 +1,24 @@
+import { useState } from "react";
 import { Archive, Check } from "lucide-react";
 import { AuthRequiredState } from "@/components/common/AuthRequiredState";
-import { useArchiveEntity, useEntities, useValidateEntity } from "@/hooks/useEntities";
+import { useArchiveEntity, useCorrectEntity, useEntities, useValidateEntity } from "@/hooks/useEntities";
+import { useValidationRequirements } from "@/hooks/useValidationRequirements";
 import { getUserFacingErrorMessage, isAuthRequiredError } from "@/lib/errors";
 import type { Entity } from "@/services/entities";
 
+const noValidationRequirementIds = new Set<string>();
+
 export function Entities() {
   const { data: entities = [], error, isError, isLoading } = useEntities();
+  const { data: validationRequirements } = useValidationRequirements();
   const suggestedEntities = entities.filter((entity) => entity.status === "suggested");
   const activeEntities = entities.filter((entity) => entity.status === "active");
+  const requiredEntityIds = new Set([
+    ...(validationRequirements?.entityIds ?? []),
+    ...suggestedEntities.filter((entity) => entity.sensitivity === "sensitive").map((entity) => entity.id)
+  ]);
+  const requiredEntities = suggestedEntities.filter((entity) => requiredEntityIds.has(entity.id));
+  const optionalEntities = suggestedEntities.filter((entity) => !requiredEntityIds.has(entity.id));
 
   if (isLoading) {
     return (
@@ -39,9 +50,18 @@ export function Entities() {
   return (
     <section className="space-y-6">
       <EntitiesHeader />
+      {requiredEntities.length > 0 ? (
+        <EntitySection
+          emptyDescription=""
+          entities={requiredEntities}
+          showActions
+          title="Needs your confirmation"
+          requiresConfirmationIds={requiredEntityIds}
+        />
+      ) : null}
       <EntitySection
         emptyDescription="Suggested entities will appear after processing observations."
-        entities={suggestedEntities}
+        entities={optionalEntities}
         showActions
         title="Suggested"
       />
@@ -60,7 +80,7 @@ function EntitiesHeader() {
     <div>
       <h2 className="text-2xl font-semibold tracking-normal">Entities</h2>
       <p className="mt-2 text-sm leading-6 text-muted-foreground">
-        Review the people, projects, places, habits, and values Life OS has suggested.
+        Suggestions stay tentative until you choose to confirm them. Life OS only asks for your confirmation when it cannot safely settle something on its own.
       </p>
     </div>
   );
@@ -71,13 +91,15 @@ function EntitySection({
   entities,
   showActions = false,
   showArchiveActions = false,
-  title
+  title,
+  requiresConfirmationIds = noValidationRequirementIds
 }: {
   emptyDescription: string;
   entities: Entity[];
   showArchiveActions?: boolean;
   showActions?: boolean;
   title: string;
+  requiresConfirmationIds?: Set<string>;
 }) {
   return (
     <div className="space-y-3">
@@ -98,6 +120,7 @@ function EntitySection({
               key={entity.id}
               showActions={showActions}
               showArchiveActions={showArchiveActions}
+              requiresConfirmation={requiresConfirmationIds.has(entity.id)}
             />
           ))}
         </div>
@@ -109,11 +132,13 @@ function EntitySection({
 function EntityCard({
   entity,
   showActions,
-  showArchiveActions
+  showArchiveActions,
+  requiresConfirmation
 }: {
   entity: Entity;
   showActions: boolean;
   showArchiveActions: boolean;
+  requiresConfirmation: boolean;
 }) {
   return (
     <article className="rounded-lg border border-border bg-card p-4 text-card-foreground shadow-sm">
@@ -137,18 +162,38 @@ function EntityCard({
         Updated {formatDate(entity.updated_at)}
       </div>
 
-      {showActions ? <EntityActions entityId={entity.id} mode="review" /> : null}
-      {showArchiveActions ? <EntityActions entityId={entity.id} mode="archive" /> : null}
+      {requiresConfirmation ? (
+        <p className="mt-3 text-sm leading-5 text-muted-foreground">
+          Life OS will keep this tentative until you decide.
+        </p>
+      ) : null}
+
+      {showActions ? <EntityActions entity={entity} mode="review" /> : null}
+      {showArchiveActions ? <EntityActions entity={entity} mode="archive" /> : null}
     </article>
   );
 }
 
-function EntityActions({ entityId, mode }: { entityId: string; mode: "archive" | "review" }) {
+function EntityActions({ entity, mode }: { entity: Entity; mode: "archive" | "review" }) {
   const validateEntity = useValidateEntity();
+  const correctEntity = useCorrectEntity();
   const archiveEntity = useArchiveEntity();
-  const isPending = validateEntity.isPending || archiveEntity.isPending;
-  const error = validateEntity.error ?? archiveEntity.error;
+  const [isCorrecting, setIsCorrecting] = useState(false);
+  const [description, setDescription] = useState(entity.description ?? "");
+  const isPending = validateEntity.isPending || correctEntity.isPending || archiveEntity.isPending;
+  const error = validateEntity.error ?? correctEntity.error ?? archiveEntity.error;
   const isReviewMode = mode === "review";
+  const correctionFieldId = `entity-correction-${entity.id}`;
+
+  function submitCorrection(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    correctEntity.mutate({
+      entityId: entity.id,
+      description: description.trim() || null
+    }, {
+      onSuccess: () => setIsCorrecting(false)
+    });
+  }
 
   return (
     <div className="mt-4 space-y-2">
@@ -157,23 +202,70 @@ function EntityActions({ entityId, mode }: { entityId: string; mode: "archive" |
           <button
             className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
             disabled={isPending}
-            onClick={() => validateEntity.mutate(entityId)}
+            onClick={() => validateEntity.mutate(entity.id)}
             type="button"
           >
             <Check aria-hidden="true" className="size-4" />
-            Validate
+            Confirm
           </button>
         ) : null}
         <button
           className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
           disabled={isPending}
-          onClick={() => archiveEntity.mutate(entityId)}
+          onClick={() => archiveEntity.mutate(entity.id)}
           type="button"
         >
           <Archive aria-hidden="true" className="size-4" />
           Archive
         </button>
       </div>
+
+      {isCorrecting ? (
+        <form className="space-y-2" onSubmit={submitCorrection}>
+          <label className="block text-sm font-medium" htmlFor={correctionFieldId}>
+            What should Life OS remember instead?
+          </label>
+          <textarea
+            className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            disabled={isPending}
+            id={correctionFieldId}
+            onChange={(event) => setDescription(event.target.value)}
+            value={description}
+          />
+          <p className="text-xs leading-5 text-muted-foreground">
+            Saving your correction makes this the current confirmed understanding. Earlier evidence stays in history.
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              className="inline-flex min-h-10 items-center justify-center rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isPending}
+              type="submit"
+            >
+              Save correction
+            </button>
+            <button
+              className="inline-flex min-h-10 items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isPending}
+              onClick={() => {
+                setDescription(entity.description ?? "");
+                setIsCorrecting(false);
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <button
+          className="inline-flex min-h-10 w-full items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={isPending}
+          onClick={() => setIsCorrecting(true)}
+          type="button"
+        >
+          Correct
+        </button>
+      )}
 
       {error ? (
         <p className="text-sm leading-5 text-destructive">

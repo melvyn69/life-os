@@ -1,13 +1,24 @@
+import { useState } from "react";
 import { Archive, Check } from "lucide-react";
 import { AuthRequiredState } from "@/components/common/AuthRequiredState";
-import { useArchiveMemory, useMemories, useValidateMemory } from "@/hooks/useMemories";
+import { useArchiveMemory, useCorrectMemory, useMemories, useValidateMemory } from "@/hooks/useMemories";
+import { useValidationRequirements } from "@/hooks/useValidationRequirements";
 import { getUserFacingErrorMessage, isAuthRequiredError } from "@/lib/errors";
 import type { MemoryWithEntity } from "@/services/memories";
 
+const noValidationRequirementIds = new Set<string>();
+
 export function Memory() {
   const { data: memories = [], error, isError, isLoading } = useMemories();
+  const { data: validationRequirements } = useValidationRequirements();
   const suggestedMemories = memories.filter((memory) => memory.status === "suggested");
   const activeMemories = memories.filter((memory) => memory.status === "active");
+  const requiredMemoryIds = new Set([
+    ...(validationRequirements?.memoryIds ?? []),
+    ...suggestedMemories.filter((memory) => memory.sensitivity === "sensitive").map((memory) => memory.id)
+  ]);
+  const requiredMemories = suggestedMemories.filter((memory) => requiredMemoryIds.has(memory.id));
+  const optionalMemories = suggestedMemories.filter((memory) => !requiredMemoryIds.has(memory.id));
 
   if (isLoading) {
     return (
@@ -39,9 +50,18 @@ export function Memory() {
   return (
     <section className="space-y-6">
       <MemoryHeader />
+      {requiredMemories.length > 0 ? (
+        <MemorySection
+          emptyDescription=""
+          memories={requiredMemories}
+          showActions
+          title="Needs your confirmation"
+          requiresConfirmationIds={requiredMemoryIds}
+        />
+      ) : null}
       <MemorySection
         emptyDescription="Suggested memories will appear after processing observations."
-        memories={suggestedMemories}
+        memories={optionalMemories}
         showActions
         title="Suggested"
       />
@@ -60,7 +80,7 @@ function MemoryHeader() {
     <div>
       <h2 className="text-2xl font-semibold tracking-normal">Memory</h2>
       <p className="mt-2 text-sm leading-6 text-muted-foreground">
-        Confirm what Life OS may remember. Suggestions stay inactive until you validate them.
+        Suggestions stay tentative until you choose to confirm them. Life OS only asks for your confirmation when it cannot safely settle something on its own.
       </p>
     </div>
   );
@@ -71,13 +91,15 @@ function MemorySection({
   memories,
   showActions = false,
   showArchiveActions = false,
-  title
+  title,
+  requiresConfirmationIds = noValidationRequirementIds
 }: {
   emptyDescription: string;
   memories: MemoryWithEntity[];
   showArchiveActions?: boolean;
   showActions?: boolean;
   title: string;
+  requiresConfirmationIds?: Set<string>;
 }) {
   return (
     <div className="space-y-3">
@@ -98,6 +120,7 @@ function MemorySection({
               memory={memory}
               showActions={showActions}
               showArchiveActions={showArchiveActions}
+              requiresConfirmation={requiresConfirmationIds.has(memory.id)}
             />
           ))}
         </div>
@@ -109,11 +132,13 @@ function MemorySection({
 function MemoryCard({
   memory,
   showActions,
-  showArchiveActions
+  showArchiveActions,
+  requiresConfirmation
 }: {
   memory: MemoryWithEntity;
   showActions: boolean;
   showArchiveActions: boolean;
+  requiresConfirmation: boolean;
 }) {
   return (
     <article className="rounded-lg border border-border bg-card p-4 text-card-foreground shadow-sm">
@@ -133,18 +158,38 @@ function MemoryCard({
         Updated {formatDate(memory.updated_at)}
       </div>
 
-      {showActions ? <MemoryActions memoryId={memory.id} mode="review" /> : null}
-      {showArchiveActions ? <MemoryActions memoryId={memory.id} mode="archive" /> : null}
+      {requiresConfirmation ? (
+        <p className="mt-3 text-sm leading-5 text-muted-foreground">
+          Life OS will keep this tentative until you decide.
+        </p>
+      ) : null}
+
+      {showActions ? <MemoryActions memory={memory} mode="review" /> : null}
+      {showArchiveActions ? <MemoryActions memory={memory} mode="archive" /> : null}
     </article>
   );
 }
 
-function MemoryActions({ memoryId, mode }: { memoryId: string; mode: "archive" | "review" }) {
+function MemoryActions({ memory, mode }: { memory: MemoryWithEntity; mode: "archive" | "review" }) {
   const validateMemory = useValidateMemory();
+  const correctMemory = useCorrectMemory();
   const archiveMemory = useArchiveMemory();
-  const isPending = validateMemory.isPending || archiveMemory.isPending;
-  const error = validateMemory.error ?? archiveMemory.error;
+  const [isCorrecting, setIsCorrecting] = useState(false);
+  const [content, setContent] = useState(memory.content);
+  const isPending = validateMemory.isPending || correctMemory.isPending || archiveMemory.isPending;
+  const error = validateMemory.error ?? correctMemory.error ?? archiveMemory.error;
   const isReviewMode = mode === "review";
+  const correctionFieldId = `memory-correction-${memory.id}`;
+
+  function submitCorrection(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    correctMemory.mutate({
+      content,
+      memoryId: memory.id
+    }, {
+      onSuccess: () => setIsCorrecting(false)
+    });
+  }
 
   return (
     <div className="mt-4 space-y-2">
@@ -153,23 +198,70 @@ function MemoryActions({ memoryId, mode }: { memoryId: string; mode: "archive" |
           <button
             className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
             disabled={isPending}
-            onClick={() => validateMemory.mutate(memoryId)}
+            onClick={() => validateMemory.mutate(memory.id)}
             type="button"
           >
             <Check aria-hidden="true" className="size-4" />
-            Validate
+            Confirm
           </button>
         ) : null}
         <button
           className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
           disabled={isPending}
-          onClick={() => archiveMemory.mutate(memoryId)}
+          onClick={() => archiveMemory.mutate(memory.id)}
           type="button"
         >
           <Archive aria-hidden="true" className="size-4" />
           Archive
         </button>
       </div>
+
+      {isCorrecting ? (
+        <form className="space-y-2" onSubmit={submitCorrection}>
+          <label className="block text-sm font-medium" htmlFor={correctionFieldId}>
+            What should Life OS remember instead?
+          </label>
+          <textarea
+            className="min-h-24 w-full rounded-md border border-input bg-background px-3 py-2 text-sm leading-6 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            disabled={isPending}
+            id={correctionFieldId}
+            onChange={(event) => setContent(event.target.value)}
+            value={content}
+          />
+          <p className="text-xs leading-5 text-muted-foreground">
+            Saving your correction makes this the current confirmed understanding. Earlier evidence stays in history.
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              className="inline-flex min-h-10 items-center justify-center rounded-md bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isPending}
+              type="submit"
+            >
+              Save correction
+            </button>
+            <button
+              className="inline-flex min-h-10 items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isPending}
+              onClick={() => {
+                setContent(memory.content);
+                setIsCorrecting(false);
+              }}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : (
+        <button
+          className="inline-flex min-h-10 w-full items-center justify-center rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={isPending}
+          onClick={() => setIsCorrecting(true)}
+          type="button"
+        >
+          Correct
+        </button>
+      )}
 
       {error ? (
         <p className="text-sm leading-5 text-destructive">

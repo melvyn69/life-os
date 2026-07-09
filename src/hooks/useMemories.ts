@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { archiveMemory, listMemories, validateMemory } from "@/services/memories";
+import { archiveMemory, correctMemory, listMemories, validateMemory } from "@/services/memories";
 
 export const memoriesQueryKey = ["memories"] as const;
 
@@ -15,6 +15,17 @@ export function useValidateMemory() {
 
   return useMutation({
     mutationFn: validateMemory,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: memoriesQueryKey });
+    }
+  });
+}
+
+export function useCorrectMemory() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: correctMemory,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: memoriesQueryKey });
     }

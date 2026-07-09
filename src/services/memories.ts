@@ -10,6 +10,11 @@ export type MemoryWithEntity = Memory & {
   } | null;
 };
 
+export type MemoryCorrection = {
+  content: string;
+  memoryId: string;
+};
+
 export async function listMemories() {
   const userId = await getCurrentUserId();
 
@@ -40,6 +45,35 @@ export async function validateMemory(memoryId: string) {
     .eq("id", memoryId)
     .eq("user_id", userId)
     .eq("status", "suggested")
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+export async function correctMemory({ content, memoryId }: MemoryCorrection) {
+  const userId = await getCurrentUserId();
+  const correctedContent = content.trim();
+
+  if (!correctedContent) {
+    throw new Error("A correction needs some text.");
+  }
+
+  const { data, error } = await supabase
+    .from("memories")
+    .update({
+      confidence: "confirmed",
+      content: correctedContent,
+      status: "active",
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", memoryId)
+    .eq("user_id", userId)
+    .in("status", ["suggested", "active"])
     .select()
     .single();
 

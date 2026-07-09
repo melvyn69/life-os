@@ -4,6 +4,11 @@ import type { Database } from "@/types/database";
 
 export type Entity = Database["public"]["Tables"]["entities"]["Row"];
 
+export type EntityCorrection = {
+  entityId: string;
+  description: string | null;
+};
+
 export async function listEntities() {
   const userId = await getCurrentUserId();
 
@@ -34,6 +39,30 @@ export async function validateEntity(entityId: string) {
     .eq("id", entityId)
     .eq("user_id", userId)
     .eq("status", "suggested")
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+export async function correctEntity({ entityId, description }: EntityCorrection) {
+  const userId = await getCurrentUserId();
+
+  const { data, error } = await supabase
+    .from("entities")
+    .update({
+      confidence: "confirmed",
+      description,
+      status: "active",
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", entityId)
+    .eq("user_id", userId)
+    .in("status", ["suggested", "active"])
     .select()
     .single();
 

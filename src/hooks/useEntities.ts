@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { archiveEntity, listEntities, validateEntity } from "@/services/entities";
+import { archiveEntity, correctEntity, listEntities, validateEntity } from "@/services/entities";
 
 export const entitiesQueryKey = ["entities"] as const;
 
@@ -15,6 +15,17 @@ export function useValidateEntity() {
 
   return useMutation({
     mutationFn: validateEntity,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: entitiesQueryKey });
+    }
+  });
+}
+
+export function useCorrectEntity() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: correctEntity,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: entitiesQueryKey });
     }
