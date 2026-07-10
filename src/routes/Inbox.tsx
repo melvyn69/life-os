@@ -1,8 +1,7 @@
-import { EyeOff } from "lucide-react";
 import { AnalyzeCaptureButton } from "@/components/inbox/AnalyzeCaptureButton";
 import { ProcessObservationsButton } from "@/components/inbox/ProcessObservationsButton";
 import { useCaptures } from "@/hooks/useCaptures";
-import { useIgnoreObservation, useSuggestedObservations } from "@/hooks/useObservations";
+import { useSuggestedObservations } from "@/hooks/useObservations";
 import { AuthRequiredState } from "@/components/common/AuthRequiredState";
 import { getUserFacingErrorMessage, isAuthRequiredError } from "@/lib/errors";
 import type { SuggestedObservation } from "@/services/observations";
@@ -116,7 +115,6 @@ function SuggestedObservationsSection({
   isLoading: boolean;
   observations: SuggestedObservation[];
 }) {
-  const ignoreObservation = useIgnoreObservation();
   const observationGroups = groupSuggestedObservations(observations);
 
   return (
@@ -175,27 +173,12 @@ function SuggestedObservationsSection({
                       <ObservationBadge label={observation.confidence} />
                       <ObservationBadge label={observation.sensitivity} />
                     </div>
-                    <button
-                      className="mt-3 inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm font-semibold text-foreground transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-                      disabled={ignoreObservation.isPending}
-                      onClick={() => ignoreObservation.mutate(observation.id)}
-                      type="button"
-                    >
-                      <EyeOff aria-hidden="true" className="size-4" />
-                      Ignore
-                    </button>
                   </div>
                 ))}
               </div>
             </article>
           ))}
         </div>
-      ) : null}
-
-      {ignoreObservation.isError ? (
-        <p className="text-sm leading-5 text-destructive">
-          {getUserFacingErrorMessage(ignoreObservation.error, "Unable to ignore this observation right now.")}
-        </p>
       ) : null}
     </div>
   );

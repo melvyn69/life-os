@@ -463,7 +463,34 @@ export type Database = {
       };
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: {
+      confirm_entity: {
+        Args: {
+          p_entity_id: string;
+        };
+        Returns: Database["public"]["Tables"]["entities"]["Row"];
+      };
+      confirm_memory: {
+        Args: {
+          p_memory_id: string;
+        };
+        Returns: Database["public"]["Tables"]["memories"]["Row"];
+      };
+      correct_entity: {
+        Args: {
+          p_description: string | null;
+          p_entity_id: string;
+        };
+        Returns: Database["public"]["Tables"]["entities"]["Row"];
+      };
+      correct_memory: {
+        Args: {
+          p_content: string;
+          p_memory_id: string;
+        };
+        Returns: Database["public"]["Tables"]["memories"]["Row"];
+      };
+    };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
   };

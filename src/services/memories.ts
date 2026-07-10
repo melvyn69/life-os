@@ -33,20 +33,8 @@ export async function listMemories() {
 }
 
 export async function validateMemory(memoryId: string) {
-  const userId = await getCurrentUserId();
-
   const { data, error } = await supabase
-    .from("memories")
-    .update({
-      confidence: "confirmed",
-      status: "active",
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", memoryId)
-    .eq("user_id", userId)
-    .eq("status", "suggested")
-    .select()
-    .single();
+    .rpc("confirm_memory", { p_memory_id: memoryId });
 
   if (error) {
     throw error;
@@ -56,7 +44,6 @@ export async function validateMemory(memoryId: string) {
 }
 
 export async function correctMemory({ content, memoryId }: MemoryCorrection) {
-  const userId = await getCurrentUserId();
   const correctedContent = content.trim();
 
   if (!correctedContent) {
@@ -64,18 +51,10 @@ export async function correctMemory({ content, memoryId }: MemoryCorrection) {
   }
 
   const { data, error } = await supabase
-    .from("memories")
-    .update({
-      confidence: "confirmed",
-      content: correctedContent,
-      status: "active",
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", memoryId)
-    .eq("user_id", userId)
-    .in("status", ["suggested", "active"])
-    .select()
-    .single();
+    .rpc("correct_memory", {
+      p_content: correctedContent,
+      p_memory_id: memoryId
+    });
 
   if (error) {
     throw error;

@@ -51,28 +51,6 @@ export async function listSuggestedObservations() {
   return data as SuggestedObservation[];
 }
 
-export async function ignoreObservation(observationId: string) {
-  const userId = await getCurrentUserId();
-
-  const { data, error } = await supabase
-    .from("observations")
-    .update({
-      status: "hidden",
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", observationId)
-    .eq("user_id", userId)
-    .eq("status", "suggested")
-    .select()
-    .single();
-
-  if (error) {
-    throw error;
-  }
-
-  return data;
-}
-
 export async function processObservations(captureId: string) {
   const { data, error } = await supabase.functions.invoke<ProcessObservationsResponse>(
     "process-observations",

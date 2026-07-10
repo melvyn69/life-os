@@ -118,20 +118,11 @@ type ConfidenceChange = {
   reason: string;
 };
 
-type ConfidenceRecommendation = {
-  confidence: Confidence;
-  reason: string;
-};
-
 type ConfidenceTarget = {
   confidence: StoredConfidence;
-  content?: string;
-  description?: string | null;
   id: string;
-  name?: string;
   sensitivity: Sensitivity;
   status: string;
-  type: string;
 };
 
 type AiEntity = {
@@ -157,7 +148,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS"
 };
 
-const promptVersion = "life-os-process-observations-v3";
+const promptVersion = "life-os-process-observations-v4";
 
 const entityTypes = new Set<EntityType>([
   "person",
@@ -268,22 +259,6 @@ const suggestionSchema = {
   required: ["entities", "memories"]
 };
 
-const confidenceRecommendationSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    confidence: {
-      type: "string",
-      enum: [...confidenceLevels]
-    },
-    reason: {
-      type: "string",
-      description: "A concise explanation grounded only in the supplied evidence."
-    }
-  },
-  required: ["confidence", "reason"]
-};
-
 const systemPrompt = [
   "You are the memory structuring layer of a personal life companion.",
   "From suggested observations, identify only clear entities and useful memory candidates.",
@@ -297,17 +272,6 @@ const systemPrompt = [
   "Prefer fewer, clearer suggestions over broad interpretation.",
   "All entities and memories are suggestions for user review, never active memory.",
   "Return JSON only."
-].join("\n");
-
-const confidenceSystemPrompt = [
-  "You are the cautious confidence evaluator for a personal life companion.",
-  "Evaluate one normal-sensitivity entity or memory using only its immutable, recorded supporting evidence.",
-  "Confidence is a behavior guide, not a claim of truth.",
-  "Do not return confirmed. Never lower confidence. Return the current confidence when support is insufficient or uncertainty remains.",
-  "One independent capture is insufficient for promotion. Medium requires several independent, consistent signals. High requires repeated, coherent evidence across time with no credible uncertainty.",
-  "Use the supplied timestamps and observation content to assess temporal continuity and context. Do not invent context, facts, relationships, or evidence.",
-  "The evidence list contains one representative observation per independent source. A contradiction would already prevent evaluation, but preserve caution if the evidence itself is ambiguous.",
-  "Prefer no change over a weak promotion. Return JSON only."
 ].join("\n");
 
 Deno.serve(async (request) => {
@@ -572,13 +536,7 @@ Deno.serve(async (request) => {
       ? await insertMemoryEvidence(supabase, user.id, evidenceCandidates)
       : [];
     const confidenceChanges = insertedEvidence.length > 0
-      ? await evolveConfidenceFromEvidence({
-        apiKey: openAiKey,
-        evidence: insertedEvidence,
-        model: openAiModel,
-        supabase,
-        userId: user.id
-      })
+      ? await evolveConfidenceFromEvidence(supabase, user.id, insertedEvidence)
       : [];
 
     return jsonResponse({
@@ -685,101 +643,6 @@ async function suggestEntitiesAndMemoriesWithOpenAi({
   return validateAiSuggestionPayload(parsed, new Set(observations.map((observation) => observation.id)));
 }
 
-async function recommendConfidenceWithOpenAi({
-  apiKey,
-  currentConfidence,
-  evidence,
-  model,
-  recordType,
-  target
-}: {
-  apiKey: string;
-  currentConfidence: Confidence;
-  evidence: Array<Pick<Observation, "capture_id" | "confidence" | "content" | "created_at" | "id" | "sensitivity" | "type">>;
-  model: string;
-  recordType: "entity" | "memory";
-  target: ConfidenceTarget;
-}): Promise<ConfidenceRecommendation> {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: confidenceSystemPrompt
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            current_confidence: currentConfidence,
-            independent_evidence: evidence,
-            target: recordType === "entity"
-              ? {
-                description: readOptionalString(target.description),
-                name: readString(target.name, "target name"),
-                type: readString(target.type, "target type")
-              }
-              : {
-                content: readString(target.content, "target content"),
-                type: readString(target.type, "target type")
-              },
-            target_type: recordType
-          })
-        }
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "life_os_confidence_recommendation",
-          schema: confidenceRecommendationSchema,
-          strict: true
-        }
-      }
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error("OpenAI confidence request failed.");
-  }
-
-  const completion = await response.json();
-  const content = completion?.choices?.[0]?.message?.content;
-
-  if (typeof content !== "string") {
-    throw new Error("OpenAI returned no confidence JSON.");
-  }
-
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw new Error("OpenAI returned malformed confidence JSON.");
-  }
-
-  return validateConfidenceRecommendation(parsed);
-}
-
-function validateConfidenceRecommendation(value: unknown): ConfidenceRecommendation {
-  if (!isRecord(value)) {
-    throw new Error("AI confidence recommendation must be an object.");
-  }
-
-  const confidence = readConfidence(value.confidence);
-  const reason = readString(value.reason, "confidence reason").trim();
-
-  if (!reason || reason.length > 500) {
-    throw new Error("AI confidence reason must contain between one and 500 characters.");
-  }
-
-  return { confidence, reason };
-}
-
 function getIndependentEvidenceObservations(observations: Array<Pick<Observation, "capture_id" | "confidence" | "content" | "created_at" | "id" | "sensitivity" | "type">>) {
   const observationsBySource = new Map<string, Pick<Observation, "capture_id" | "confidence" | "content" | "created_at" | "id" | "sensitivity" | "type">>();
 
@@ -795,16 +658,6 @@ function getIndependentEvidenceObservations(observations: Array<Pick<Observation
 
   return [...observationsBySource.values()]
     .sort((left, right) => (left.created_at ?? "").localeCompare(right.created_at ?? ""));
-}
-
-function isConfidenceIncrease(currentConfidence: Confidence, recommendation: Confidence) {
-  const confidenceRank: Record<Confidence, number> = {
-    low: 1,
-    medium: 2,
-    high: 3
-  };
-
-  return confidenceRank[recommendation] > confidenceRank[currentConfidence];
 }
 
 function validateAiSuggestionPayload(payload: unknown, observationIds: Set<string>) {
@@ -1084,19 +937,11 @@ async function insertMemoryEvidence(
   return data ?? [];
 }
 
-async function evolveConfidenceFromEvidence({
-  apiKey,
-  evidence,
-  model,
-  supabase,
-  userId
-}: {
-  apiKey: string;
-  evidence: MemoryEvidence[];
-  model: string;
-  supabase: LifeOsSupabaseClient;
-  userId: string;
-}) {
+async function evolveConfidenceFromEvidence(
+  supabase: LifeOsSupabaseClient,
+  userId: string,
+  evidence: MemoryEvidence[]
+) {
   const entityIds = [...new Set(
     evidence
       .filter((item) => item.direction === "supports" && item.entity_id !== null)
@@ -1109,21 +954,17 @@ async function evolveConfidenceFromEvidence({
   )];
 
   return [
-    ...await evolveTargetConfidence({ apiKey, model, recordType: "entity", supabase, targetIds: entityIds, userId }),
-    ...await evolveTargetConfidence({ apiKey, model, recordType: "memory", supabase, targetIds: memoryIds, userId })
+    ...await evolveTargetConfidence({ recordType: "entity", supabase, targetIds: entityIds, userId }),
+    ...await evolveTargetConfidence({ recordType: "memory", supabase, targetIds: memoryIds, userId })
   ];
 }
 
 async function evolveTargetConfidence({
-  apiKey,
-  model,
   recordType,
   supabase,
   targetIds,
   userId
 }: {
-  apiKey: string;
-  model: string;
   recordType: "entity" | "memory";
   supabase: LifeOsSupabaseClient;
   targetIds: string[];
@@ -1211,27 +1052,20 @@ async function evolveTargetConfidence({
 
     const independentObservations = getIndependentEvidenceObservations(observations ?? []);
 
-    if (independentObservations.length < 2) {
+    if (independentObservations.some((observation) => observation.sensitivity === "sensitive")) {
       continue;
     }
 
-    const recommendation = await recommendConfidenceWithOpenAi({
-      apiKey,
-      currentConfidence: confidence,
-      evidence: independentObservations,
-      model,
-      recordType,
-      target
-    });
+    const nextConfidence = getDeterministicConfidencePromotion(confidence, independentObservations.length);
 
-    if (!isConfidenceIncrease(confidence, recommendation.confidence)) {
+    if (!nextConfidence) {
       continue;
     }
 
     const { data: updatedTarget, error: updateError } = await supabase
       .from(table)
       .update({
-        confidence: recommendation.confidence,
+        confidence: nextConfidence,
         updated_at: new Date().toISOString()
       })
       .eq("id", target.id)
@@ -1249,17 +1083,40 @@ async function evolveTargetConfidence({
     }
 
     changes.push({
-      confidence: recommendation.confidence,
+      confidence: nextConfidence,
       evidence_observation_ids: independentObservations.map((observation) => observation.id),
       independent_source_count: independentObservations.length,
       previous_confidence: confidence,
       record_id: target.id,
       record_type: recordType,
-      reason: recommendation.reason
+      reason: buildConfidencePromotionReason(confidence, nextConfidence, independentObservations.length)
     });
   }
 
   return changes;
+}
+
+function getDeterministicConfidencePromotion(
+  confidence: Confidence,
+  independentSourceCount: number
+): Confidence | null {
+  if (confidence === "low" && independentSourceCount >= 2) {
+    return "medium";
+  }
+
+  if (confidence === "medium" && independentSourceCount >= 3) {
+    return "high";
+  }
+
+  return null;
+}
+
+function buildConfidencePromotionReason(
+  previousConfidence: Confidence,
+  confidence: Confidence,
+  independentSourceCount: number
+) {
+  return `${independentSourceCount} independent normal-sensitivity captures support a ${previousConfidence}-to-${confidence} promotion without unresolved contradiction.`;
 }
 
 async function listConfidenceEntityTargets(
@@ -2625,10 +2482,6 @@ function normalizeFactValue(value: string) {
     .toLocaleLowerCase()
     .replace(/[^\p{L}\p{N}\s/-]/gu, "")
     .replace(/\s+/g, " ");
-}
-
-function readOptionalString(value: unknown) {
-  return typeof value === "string" ? value : null;
 }
 
 function getFactTokens(value: string) {

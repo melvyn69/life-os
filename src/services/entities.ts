@@ -27,20 +27,8 @@ export async function listEntities() {
 }
 
 export async function validateEntity(entityId: string) {
-  const userId = await getCurrentUserId();
-
   const { data, error } = await supabase
-    .from("entities")
-    .update({
-      confidence: "confirmed",
-      status: "active",
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", entityId)
-    .eq("user_id", userId)
-    .eq("status", "suggested")
-    .select()
-    .single();
+    .rpc("confirm_entity", { p_entity_id: entityId });
 
   if (error) {
     throw error;
@@ -50,21 +38,11 @@ export async function validateEntity(entityId: string) {
 }
 
 export async function correctEntity({ entityId, description }: EntityCorrection) {
-  const userId = await getCurrentUserId();
-
   const { data, error } = await supabase
-    .from("entities")
-    .update({
-      confidence: "confirmed",
-      description,
-      status: "active",
-      updated_at: new Date().toISOString()
-    })
-    .eq("id", entityId)
-    .eq("user_id", userId)
-    .in("status", ["suggested", "active"])
-    .select()
-    .single();
+    .rpc("correct_entity", {
+      p_description: description,
+      p_entity_id: entityId
+    });
 
   if (error) {
     throw error;
