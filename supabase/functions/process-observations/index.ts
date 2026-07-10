@@ -1,6 +1,19 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.110.1";
+import {
+  createClient,
+  type SupabaseClient
+} from "https://esm.sh/@supabase/supabase-js@2.110.1";
+import type { Database } from "../_shared/database.ts";
+import {
+  isRecord,
+  persistRelationshipSuggestions,
+  readOpenAiJsonContent,
+  relationshipSchema,
+  validateAiRelationships
+} from "../_shared/life-graph.ts";
+import { logSafeOperation, type ApiErrorCode } from "../_shared/http.ts";
+import { OpenAiRequestError, requestOpenAiJson } from "../_shared/openai.ts";
 
-type LifeOsSupabaseClient = ReturnType<typeof createClient<any>>;
+type LifeOsSupabaseClient = SupabaseClient<Database>;
 type Confidence = "low" | "medium" | "high";
 type StoredConfidence = Confidence | "confirmed";
 type Sensitivity = "normal" | "sensitive";
@@ -142,6 +155,38 @@ type AiMemory = {
   source_observation_id: string;
 };
 
+type ExistingRelationshipContext = {
+  relationship_type: string;
+  source_entity_id: string;
+  target_entity_id: string;
+  status: string;
+  confidence: string;
+  start_date: string | null;
+  end_date: string | null;
+  date_precision: string;
+};
+
+type EntityInsertCandidate = {
+  confidence: Confidence;
+  description: string;
+  name: string;
+  sensitivity: Sensitivity;
+  status: "suggested";
+  type: EntityType;
+  user_id: string;
+};
+
+type MemoryInsertCandidate = {
+  confidence: Confidence;
+  content: string;
+  entity_id: string | null;
+  observation_id: string;
+  sensitivity: Sensitivity;
+  status: "suggested";
+  type: string;
+  user_id: string;
+};
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -254,7 +299,17 @@ const suggestionSchema = {
         },
         required: ["entity_name", "content", "confidence", "sensitivity", "source_observation_id"]
       }
-    }
+    },
+    relationships: relationshipSchema
+  },
+  required: ["entities", "memories", "relationships"]
+};
+
+const memoryOnlySuggestionSchema = {
+  ...suggestionSchema,
+  properties: {
+    entities: suggestionSchema.properties.entities,
+    memories: suggestionSchema.properties.memories
   },
   required: ["entities", "memories"]
 };
@@ -268,19 +323,55 @@ const systemPrompt = [
   "Do not diagnose, infer hidden motives, score the user, or make psychological conclusions.",
   "Do not invent facts, dates, names, identifiers, relationships, or sources.",
   "Use only observation IDs that were supplied in the user message.",
+  "Relationship references must exactly match an existing or suggested entity name.",
+  "Use only the canonical relationship vocabulary supplied by the schema.",
+  "Use contextually_associated_with for repeated meaningful context without a proven semantic role.",
+  "Co-occurrence never proves employment, ownership, causality, family, romance, health, religion, politics, sexuality, conflict, or emotional closeness.",
+  "Set evidence_relation to contradicting only when supplied evidence reliably conflicts with an existing relationship.",
+  "Never confirm a relationship; all relationship output remains a candidate.",
   "Every entity suggestion must list the observation IDs that directly support it.",
   "Prefer fewer, clearer suggestions over broad interpretation.",
   "All entities and memories are suggestions for user review, never active memory.",
   "Return JSON only."
 ].join("\n");
 
+const memoryOnlySystemPrompt = [
+  "You are the memory structuring layer of a personal life companion.",
+  "From suggested observations, identify only clear entities and useful memory candidates.",
+  "An entity can be a person, project, place, habit, interest, object, event, value, or other clear life element.",
+  "Do not create entities from weak assumptions.",
+  "Do not create sensitive memories unless explicitly stated in the observations.",
+  "Do not diagnose, infer hidden motives, score the user, or make psychological conclusions.",
+  "Do not invent facts, dates, names, identifiers, relationships, or sources.",
+  "Use only observation IDs that were supplied in the user message.",
+  "Every entity suggestion must list the observation IDs that directly support it.",
+  "Prefer fewer, clearer suggestions over broad interpretation.",
+  "All entities and memories are suggestions for user review, never active memory.",
+  "Relationship extraction is disabled for this operation.",
+  "Return JSON only."
+].join("\n");
+
 Deno.serve(async (request) => {
+  const requestId = crypto.randomUUID();
+  const startedAt = performance.now();
+  let userId: string | null = null;
+  let result: "success" | "failure" = "failure";
+  let errorCode: ApiErrorCode | null = null;
+  let evidenceCount = 0;
+  let operationMetrics: Record<string, number> = {};
+
   if (request.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   if (request.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed." }, 405);
+    return jsonResponse({
+      error: {
+        code: "INVALID_INPUT",
+        message: "Method not allowed.",
+        request_id: requestId
+      }
+    }, 405);
   }
 
   try {
@@ -293,14 +384,19 @@ Deno.serve(async (request) => {
 
     const supabaseUrl = readEnv("SUPABASE_URL");
     const supabaseAnonKey = readEnv("SUPABASE_ANON_KEY");
-    const openAiKey = readEnv("OPENAI_API_KEY");
-    const openAiModel = readEnv("OPENAI_MODEL");
+    const supabaseServiceRoleKey = readEnv("SUPABASE_SERVICE_ROLE_KEY");
 
-    const supabase = createClient<any>(supabaseUrl, supabaseAnonKey, {
+    const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: {
           Authorization: authorization
         }
+      }
+    });
+    const serviceClient = createClient<Database>(supabaseUrl, supabaseServiceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
       }
     });
 
@@ -311,6 +407,7 @@ Deno.serve(async (request) => {
     }
 
     const user = userData.user;
+    userId = user.id;
 
     const { data: capture, error: captureError } = await supabase
       .from("captures")
@@ -339,12 +436,24 @@ Deno.serve(async (request) => {
       throw observationsError;
     }
 
-    const suggestedObservations = (observations ?? []) as Observation[];
+    const suggestedObservations = parseObservations(observations ?? []);
+    const relationshipExtractionEnabled = readOptionalBooleanEnv(
+      "LIFE_GRAPH_RELATIONSHIP_EXTRACTION_ENABLED",
+      true
+    );
 
     if (suggestedObservations.length === 0) {
+      result = "success";
       return jsonResponse({
-        entities: [],
-        memories: [],
+        entities: { created: 0, updated: 0, duplicates: 0 },
+        memories: { created: 0, updated: 0 },
+        relationships: {
+          created: 0,
+          evidence_added: 0,
+          promoted: 0,
+          contradicted: 0,
+          skipped: 0
+        },
         prompt_version: promptVersion
       });
     }
@@ -359,11 +468,27 @@ Deno.serve(async (request) => {
       throw entitiesError;
     }
 
+    const { data: existingRelationships, error: relationshipsError } = await supabase
+      .from("relationships")
+      .select(
+        "relationship_type, source_entity_id, target_entity_id, status, confidence, start_date, end_date, date_precision"
+      )
+      .eq("user_id", user.id)
+      .in("status", ["suggested", "supported", "confirmed", "contradicted", "outdated"])
+      .order("updated_at", { ascending: false })
+      .limit(30);
+
+    if (relationshipsError) {
+      throw relationshipsError;
+    }
+
     const aiSuggestions = await suggestEntitiesAndMemoriesWithOpenAi({
-      apiKey: openAiKey,
+      apiKey: readEnv("OPENAI_API_KEY"),
       captureContent: capture.content,
-      existingEntities: (existingEntities ?? []) as ExistingEntity[],
-      model: openAiModel,
+      existingEntities: parseExistingEntities(existingEntities ?? []),
+      existingRelationships: existingRelationships ?? [],
+      includeRelationships: relationshipExtractionEnabled,
+      model: readEnv("OPENAI_MODEL"),
       observations: suggestedObservations
     });
 
@@ -371,7 +496,7 @@ Deno.serve(async (request) => {
     const observationById = new Map(
       suggestedObservations.map((observation) => [observation.id, observation])
     );
-    const knownEntities = (existingEntities ?? []) as ExistingEntity[];
+    const knownEntities = parseExistingEntities(existingEntities ?? []);
     const existingEntityIds = new Set(knownEntities.map((entity) => entity.id));
     const existingEntityByName = new Map(
       knownEntities.map((entity) => [
@@ -383,8 +508,8 @@ Deno.serve(async (request) => {
     const entityNamesToInsert = new Set<string>();
 
     const suggestedEntities = aiSuggestions.entities.filter((entity) => entity.confidence !== "low");
-    const entitiesToInsert = suggestedEntities
-      .flatMap((entity) => {
+    const entitiesToInsert: EntityInsertCandidate[] = suggestedEntities
+      .flatMap((entity): EntityInsertCandidate[] => {
         const normalizedEntityName = normalizeName(entity.name);
         const match = findExistingEntityMatch(entity, knownEntities);
 
@@ -401,11 +526,11 @@ Deno.serve(async (request) => {
         entityNamesToInsert.add(normalizedEntityName);
 
         return [{
-          confidence: "low" as const,
+          confidence: "low",
           description: entity.description,
           name: entity.name,
-          sensitivity: hasSensitiveObservation(suggestedObservations) ? "sensitive" as const : "normal" as const,
-          status: "suggested" as const,
+          sensitivity: hasSensitiveObservation(suggestedObservations) ? "sensitive" : "normal",
+          status: "suggested",
           type: entity.type,
           user_id: user.id
         }];
@@ -415,18 +540,8 @@ Deno.serve(async (request) => {
       ? await insertEntities(supabase, entitiesToInsert)
       : [];
 
-    for (const entity of insertedEntities) {
-      const insertedEntity = {
-        confidence: entity.confidence,
-        description: entity.description,
-        id: entity.id,
-        name: entity.name,
-        sensitivity: entity.sensitivity,
-        status: entity.status,
-        type: entity.type
-      };
-
-      existingEntityByName.set(normalizeName(entity.name), {
+    for (const insertedEntity of parseExistingEntities(insertedEntities)) {
+      existingEntityByName.set(normalizeName(insertedEntity.name), {
         ...insertedEntity
       });
       knownEntities.push(insertedEntity);
@@ -454,10 +569,10 @@ Deno.serve(async (request) => {
     );
     const matchedMemoryEvidence: MemoryEvidence[] = [];
 
-    const memoriesToInsert = aiSuggestions.memories
+    const memoriesToInsert: MemoryInsertCandidate[] = aiSuggestions.memories
       .filter((memory) => observationIds.has(memory.source_observation_id))
       .filter((memory) => !existingMemoryKeys.has(buildMemoryKey(memory.source_observation_id, memory.content)))
-      .flatMap((memory) => {
+      .flatMap((memory): MemoryInsertCandidate[] => {
         const matchingEntity = resolveMemoryEntity(memory, knownEntities, existingEntityByName, entityMatchBySuggestedName);
         const sourceObservation = observationById.get(memory.source_observation_id);
         const existingMemory = findExistingMemoryMatch(
@@ -479,14 +594,14 @@ Deno.serve(async (request) => {
         }
 
         return [{
-          confidence: "low" as const,
+          confidence: "low",
           content: memory.content,
           entity_id: matchingEntity?.id ?? null,
           observation_id: memory.source_observation_id,
           sensitivity: memory.sensitivity === "sensitive" || sourceObservation?.sensitivity === "sensitive"
-            ? "sensitive" as const
-            : "normal" as const,
-          status: "suggested" as const,
+            ? "sensitive"
+            : "normal",
+          status: "suggested",
           type: "fact",
           user_id: user.id
         }];
@@ -538,19 +653,57 @@ Deno.serve(async (request) => {
     const confidenceChanges = insertedEvidence.length > 0
       ? await evolveConfidenceFromEvidence(supabase, user.id, insertedEvidence)
       : [];
+    const relationshipStats = relationshipExtractionEnabled
+      ? await persistRelationshipSuggestions({
+          relationships: aiSuggestions.relationships,
+          serviceClient,
+          userId: user.id,
+          entityIdsByName: buildUniqueEntityReferenceMap(knownEntities)
+        })
+      : {
+          created: 0,
+          evidence_added: 0,
+          promoted: 0,
+          contradicted: 0,
+          skipped: 0
+        };
+
+    evidenceCount = insertedEvidence.length + relationshipStats.evidence_added;
+    operationMetrics = {
+      relationships_created: relationshipStats.created,
+      relationship_evidence_added: relationshipStats.evidence_added,
+      relationships_promoted: relationshipStats.promoted,
+      relationships_contradicted: relationshipStats.contradicted,
+      entities_created: insertedEntities.length,
+      memories_created: insertedMemories.length
+    };
+    result = "success";
 
     return jsonResponse({
-      confidence_changes: confidenceChanges,
-      contradictions: insertedContradictions,
-      duplicate_candidates: insertedDuplicateCandidates,
-      evidence: insertedEvidence,
-      entities: insertedEntities,
-      memories: insertedMemories,
+      entities: {
+        created: insertedEntities.length,
+        updated: entityMatchBySuggestedName.size,
+        duplicates: insertedDuplicateCandidates.length
+      },
+      memories: {
+        created: insertedMemories.length,
+        updated: matchedMemoryEvidence.length
+      },
+      relationships: relationshipStats,
+      living_memory: {
+        confidence_changes: confidenceChanges.length,
+        contradictions: insertedContradictions.length,
+        evidence_added: insertedEvidence.length
+      },
       prompt_version: promptVersion
     });
   } catch (error) {
     if (error instanceof PublicError) {
-      return jsonResponse({ error: error.message }, error.status);
+      errorCode = error.code;
+      if (error.code === "AI_OUTPUT_INVALID") {
+        operationMetrics = { ai_relationship_validation_failures: 1 };
+      }
+      return jsonResponse({ error: { code: error.code, message: error.message, request_id: requestId } }, error.status);
     }
 
     console.error(
@@ -558,7 +711,26 @@ Deno.serve(async (request) => {
       error instanceof Error ? error.name : typeof error
     );
 
-    return jsonResponse({ error: "Unable to suggest memory right now." }, 500);
+    errorCode = "INTERNAL_ERROR";
+    return jsonResponse({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to suggest memory right now.",
+        request_id: requestId
+      }
+    }, 500);
+  } finally {
+    await logSafeOperation({
+      operation: "process_observations",
+      requestId,
+      userId,
+      result,
+      durationMs: performance.now() - startedAt,
+      evidenceCount,
+      errorCode,
+      promptVersion,
+      metrics: operationMetrics
+    });
   }
 });
 
@@ -566,81 +738,258 @@ async function suggestEntitiesAndMemoriesWithOpenAi({
   apiKey,
   captureContent,
   existingEntities,
+  existingRelationships,
+  includeRelationships,
   model,
   observations
 }: {
   apiKey: string;
   captureContent: string;
   existingEntities: ExistingEntity[];
+  existingRelationships: ExistingRelationshipContext[];
+  includeRelationships: boolean;
   model: string;
   observations: Observation[];
 }) {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            capture: {
-              content: captureContent
-            },
-            existing_entities: existingEntities.map((entity) => ({
-              id: entity.id,
-              name: entity.name,
-              status: entity.status,
-              type: entity.type
-            })),
-            observations: observations.map((observation) => ({
-              id: observation.id,
-              content: observation.content,
-              confidence: observation.confidence,
-              sensitivity: observation.sensitivity,
-              type: observation.type
-            }))
-          })
-        }
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "life_os_entity_memory_suggestions",
-          schema: suggestionSchema,
-          strict: true
+  let completion: unknown;
+  try {
+    completion = await requestOpenAiJson({
+      apiKey,
+      body: {
+        model,
+        messages: [
+          {
+            role: "system",
+            content: includeRelationships ? systemPrompt : memoryOnlySystemPrompt
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              capture: {
+                content: captureContent
+              },
+              existing_entities: existingEntities.map((entity) => ({
+                id: entity.id,
+                name: entity.name,
+                status: entity.status,
+                type: entity.type
+              })),
+              existing_relationships: existingRelationships,
+              observations: observations.map((observation) => ({
+                id: observation.id,
+                content: observation.content,
+                confidence: observation.confidence,
+                sensitivity: observation.sensitivity,
+                type: observation.type
+              }))
+            })
+          }
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "life_os_entity_memory_suggestions",
+            schema: includeRelationships ? suggestionSchema : memoryOnlySuggestionSchema,
+            strict: true
+          }
         }
       }
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error("OpenAI request failed.");
+    });
+  } catch (error) {
+    if (error instanceof OpenAiRequestError && error.failure === "invalid_json") {
+      throw new PublicError("Unable to suggest memory right now.", 502, "AI_OUTPUT_INVALID");
+    }
+    throw new PublicError("Unable to suggest memory right now.", 502, "AI_UNAVAILABLE");
   }
-
-  const completion = await response.json();
-  const content = completion?.choices?.[0]?.message?.content;
-
-  if (typeof content !== "string") {
-    throw new Error("OpenAI returned no JSON content.");
-  }
-
-  let parsed: unknown;
 
   try {
-    parsed = JSON.parse(content);
+    const content = readOpenAiJsonContent(completion);
+    const parsed: unknown = JSON.parse(content);
+    return validateAiSuggestionPayload(
+      parsed,
+      new Set(observations.map((observation) => observation.id)),
+      includeRelationships
+    );
   } catch {
-    throw new Error("OpenAI returned malformed JSON.");
+    throw new PublicError("Unable to suggest memory right now.", 502, "AI_OUTPUT_INVALID");
+  }
+}
+
+function parseObservations(values: unknown[]): Observation[] {
+  return values.map((value) => {
+    if (!isRecord(value)) {
+      throw new Error("Stored observation is invalid.");
+    }
+
+    return {
+      capture_id: readNullableString(value.capture_id, "capture_id"),
+      id: readString(value.id, "id"),
+      content: readString(value.content, "content"),
+      type: readString(value.type, "type"),
+      confidence: readStoredConfidence(value.confidence),
+      sensitivity: readSensitivity(value.sensitivity),
+      created_at: readNullableString(value.created_at, "created_at") ?? undefined
+    };
+  });
+}
+
+function parseExistingEntities(values: unknown[]): ExistingEntity[] {
+  return values.map((value) => {
+    if (!isRecord(value)) {
+      throw new Error("Stored entity is invalid.");
+    }
+
+    return {
+      confidence: readStoredConfidence(value.confidence),
+      description: readNullableString(value.description, "description"),
+      id: readString(value.id, "id"),
+      name: readString(value.name, "name"),
+      sensitivity: readSensitivity(value.sensitivity),
+      status: readString(value.status, "status"),
+      type: readString(value.type, "type")
+    };
+  });
+}
+
+function parseExistingMemories(values: unknown[]): ExistingMemory[] {
+  return values.map((value) => {
+    if (!isRecord(value)) {
+      throw new Error("Stored memory is invalid.");
+    }
+
+    return {
+      confidence: readStoredConfidence(value.confidence),
+      content: readString(value.content, "content"),
+      entity_id: readNullableString(value.entity_id, "entity_id"),
+      id: readString(value.id, "id"),
+      observation_id: readNullableString(value.observation_id, "observation_id"),
+      sensitivity: readSensitivity(value.sensitivity),
+      status: readString(value.status, "status")
+    };
+  });
+}
+
+function parseConfidenceTargets(values: unknown[]): ConfidenceTarget[] {
+  return values.map((value) => {
+    if (!isRecord(value)) {
+      throw new Error("Stored confidence target is invalid.");
+    }
+
+    return {
+      confidence: readStoredConfidence(value.confidence),
+      id: readString(value.id, "id"),
+      sensitivity: readSensitivity(value.sensitivity),
+      status: readString(value.status, "status")
+    };
+  });
+}
+
+function parseMemoryContradictions(values: unknown[]): MemoryContradiction[] {
+  return values.map((value) => {
+    if (!isRecord(value)) {
+      throw new Error("Stored memory contradiction is invalid.");
+    }
+
+    return {
+      user_id: readString(value.user_id, "user_id"),
+      observation_id: readNullableString(value.observation_id, "observation_id"),
+      entity_id: readNullableString(value.entity_id, "entity_id"),
+      memory_id: readNullableString(value.memory_id, "memory_id"),
+      existing_record_type: readExistingRecordType(value.existing_record_type),
+      contradiction_type: readContradictionType(value.contradiction_type),
+      existing_content: readString(value.existing_content, "existing_content"),
+      new_content: readString(value.new_content, "new_content"),
+      reason: readString(value.reason, "reason"),
+      confidence: readContradictionConfidence(value.confidence),
+      resolution_status: readUnresolvedStatus(value.resolution_status),
+      status: readSuggestedStatus(value.status)
+    };
+  });
+}
+
+function parseMemoryEvidenceRows(values: unknown[]): MemoryEvidence[] {
+  return values.map((value) => {
+    if (!isRecord(value)) {
+      throw new Error("Stored memory evidence is invalid.");
+    }
+
+    return {
+      user_id: readString(value.user_id, "user_id"),
+      observation_id: readString(value.observation_id, "observation_id"),
+      entity_id: readNullableString(value.entity_id, "entity_id"),
+      memory_id: readNullableString(value.memory_id, "memory_id"),
+      direction: readEvidenceDirection(value.direction),
+      reason: readString(value.reason, "reason")
+    };
+  });
+}
+
+function readExistingRecordType(value: unknown): MemoryContradiction["existing_record_type"] {
+  if (value === "entity" || value === "memory") {
+    return value;
+  }
+  throw new Error("Stored contradiction record type is invalid.");
+}
+
+function readContradictionType(value: unknown): ContradictionType {
+  if (
+    value === "date" ||
+    value === "location" ||
+    value === "organization" ||
+    value === "project_status" ||
+    value === "role"
+  ) {
+    return value;
+  }
+  throw new Error("Stored contradiction type is invalid.");
+}
+
+function readContradictionConfidence(value: unknown): MemoryContradiction["confidence"] {
+  if (value === "medium" || value === "high") {
+    return value;
+  }
+  throw new Error("Stored contradiction confidence is invalid.");
+}
+
+function readUnresolvedStatus(value: unknown): MemoryContradiction["resolution_status"] {
+  if (value === "unresolved") {
+    return value;
+  }
+  throw new Error("Stored contradiction resolution status is invalid.");
+}
+
+function readSuggestedStatus(value: unknown): MemoryContradiction["status"] {
+  if (value === "suggested") {
+    return value;
+  }
+  throw new Error("Stored contradiction status is invalid.");
+}
+
+function readEvidenceDirection(value: unknown): EvidenceDirection {
+  if (value === "supports" || value === "contradicts") {
+    return value;
+  }
+  throw new Error("Stored evidence direction is invalid.");
+}
+
+function buildUniqueEntityReferenceMap(entities: ExistingEntity[]) {
+  const entityIdsByName = new Map<string, string>();
+  const ambiguousNames = new Set<string>();
+
+  for (const entity of entities) {
+    const normalizedName = normalizeName(entity.name);
+    if (entityIdsByName.has(normalizedName)) {
+      entityIdsByName.delete(normalizedName);
+      ambiguousNames.add(normalizedName);
+      continue;
+    }
+
+    if (!ambiguousNames.has(normalizedName)) {
+      entityIdsByName.set(normalizedName, entity.id);
+    }
   }
 
-  return validateAiSuggestionPayload(parsed, new Set(observations.map((observation) => observation.id)));
+  return entityIdsByName;
 }
 
 function getIndependentEvidenceObservations(observations: Array<Pick<Observation, "capture_id" | "confidence" | "content" | "created_at" | "id" | "sensitivity" | "type">>) {
@@ -660,13 +1009,18 @@ function getIndependentEvidenceObservations(observations: Array<Pick<Observation
     .sort((left, right) => (left.created_at ?? "").localeCompare(right.created_at ?? ""));
 }
 
-function validateAiSuggestionPayload(payload: unknown, observationIds: Set<string>) {
+function validateAiSuggestionPayload(
+  payload: unknown,
+  observationIds: Set<string>,
+  includeRelationships: boolean
+) {
   if (!isRecord(payload)) {
     throw new Error("AI response must be an object.");
   }
 
   const entities = payload.entities;
   const memories = payload.memories;
+  const relationships = payload.relationships;
 
   if (!Array.isArray(entities)) {
     throw new Error("AI response entities must be an array.");
@@ -686,7 +1040,8 @@ function validateAiSuggestionPayload(payload: unknown, observationIds: Set<strin
 
   return {
     entities: entities.map((entity) => validateAiEntity(entity, observationIds)),
-    memories: memories.map((memory) => validateAiMemory(memory, observationIds))
+    memories: memories.map((memory) => validateAiMemory(memory, observationIds)),
+    relationships: includeRelationships ? validateAiRelationships(relationships, observationIds) : []
   };
 }
 
@@ -762,15 +1117,7 @@ function validateAiMemory(value: unknown, observationIds: Set<string>): AiMemory
 
 async function insertEntities(
   supabase: LifeOsSupabaseClient,
-  entities: Array<{
-    confidence: Confidence;
-    description: string;
-    name: string;
-    sensitivity: Sensitivity;
-    status: "suggested";
-    type: EntityType;
-    user_id: string;
-  }>
+  entities: EntityInsertCandidate[]
 ) {
   const { data, error } = await supabase.from("entities").insert(entities).select();
 
@@ -783,16 +1130,7 @@ async function insertEntities(
 
 async function insertMemories(
   supabase: LifeOsSupabaseClient,
-  memories: Array<{
-    confidence: Confidence;
-    content: string;
-    entity_id: string | null;
-    observation_id: string;
-    sensitivity: Sensitivity;
-    status: "suggested";
-    type: string;
-    user_id: string;
-  }>
+  memories: MemoryInsertCandidate[]
 ) {
   const { data, error } = await supabase.from("memories").insert(memories).select();
 
@@ -817,7 +1155,7 @@ async function listExistingMemories(
     throw error;
   }
 
-  return (data ?? []) as ExistingMemory[];
+  return parseExistingMemories(data ?? []);
 }
 
 async function listExistingConfirmedMemories(
@@ -826,7 +1164,7 @@ async function listExistingConfirmedMemories(
 ) {
   const { data, error } = await supabase
     .from("memories")
-    .select("id, entity_id, observation_id, content, confidence, status")
+    .select("id, entity_id, observation_id, content, confidence, sensitivity, status")
     .eq("user_id", userId)
     .in("status", ["active", "confirmed"])
     .in("confidence", ["high", "confirmed"]);
@@ -835,7 +1173,7 @@ async function listExistingConfirmedMemories(
     throw error;
   }
 
-  return (data ?? []) as ExistingMemory[];
+  return parseExistingMemories(data ?? []);
 }
 
 async function insertMemoryContradictions(
@@ -856,10 +1194,7 @@ async function insertMemoryContradictions(
 
   const existingContradictionKeys = new Set(
     (existingContradictions ?? []).map((contradiction) =>
-      buildContradictionKey(contradiction as Pick<
-        MemoryContradiction,
-        "contradiction_type" | "entity_id" | "existing_content" | "memory_id" | "new_content" | "observation_id"
-      >)
+      buildContradictionKey(contradiction)
     )
   );
   const contradictionsToInsert = contradictions.filter((contradiction) => {
@@ -886,7 +1221,7 @@ async function insertMemoryContradictions(
     throw error;
   }
 
-  return data ?? [];
+  return parseMemoryContradictions(data ?? []);
 }
 
 async function insertMemoryEvidence(
@@ -907,7 +1242,7 @@ async function insertMemoryEvidence(
 
   const evidenceKeys = new Set(
     (existingEvidence ?? []).map((item) =>
-      buildMemoryEvidenceKey(item as Pick<MemoryEvidence, "direction" | "entity_id" | "memory_id" | "observation_id">)
+      buildMemoryEvidenceKey(item)
     )
   );
   const evidenceToInsert = evidence.filter((item) => {
@@ -934,7 +1269,7 @@ async function insertMemoryEvidence(
     throw error;
   }
 
-  return data ?? [];
+  return parseMemoryEvidenceRows(data ?? []);
 }
 
 async function evolveConfidenceFromEvidence(
@@ -945,12 +1280,12 @@ async function evolveConfidenceFromEvidence(
   const entityIds = [...new Set(
     evidence
       .filter((item) => item.direction === "supports" && item.entity_id !== null)
-      .map((item) => item.entity_id as string)
+      .flatMap((item) => item.entity_id === null ? [] : [item.entity_id])
   )];
   const memoryIds = [...new Set(
     evidence
       .filter((item) => item.direction === "supports" && item.memory_id !== null)
-      .map((item) => item.memory_id as string)
+      .flatMap((item) => item.memory_id === null ? [] : [item.memory_id])
   )];
 
   return [
@@ -1033,7 +1368,7 @@ async function evolveTargetConfidence({
     }
 
     const observationIds = [...new Set(
-      (supportingEvidence ?? []).map((item) => item.observation_id as string)
+      (supportingEvidence ?? []).map((item) => item.observation_id)
     )];
 
     if (observationIds.length === 0) {
@@ -1050,7 +1385,7 @@ async function evolveTargetConfidence({
       throw observationsError;
     }
 
-    const independentObservations = getIndependentEvidenceObservations(observations ?? []);
+    const independentObservations = getIndependentEvidenceObservations(parseObservations(observations ?? []));
 
     if (independentObservations.some((observation) => observation.sensitivity === "sensitive")) {
       continue;
@@ -1135,7 +1470,7 @@ async function listConfidenceEntityTargets(
     throw error;
   }
 
-  return (data ?? []) as ConfidenceTarget[];
+  return parseConfidenceTargets(data ?? []);
 }
 
 async function listConfidenceMemoryTargets(
@@ -1154,7 +1489,7 @@ async function listConfidenceMemoryTargets(
     throw error;
   }
 
-  return (data ?? []) as ConfidenceTarget[];
+  return parseConfidenceTargets(data ?? []);
 }
 
 function buildSupportingEntityEvidence({
@@ -1356,7 +1691,7 @@ async function insertDuplicateCandidates(
 
   const existingCandidateKeys = new Set(
     (existingCandidates ?? []).map((candidate) =>
-      buildDuplicateCandidateKey(candidate as Pick<DuplicateCandidate, "candidate_name" | "duplicate_entity_id" | "entity_id">)
+      buildDuplicateCandidateKey(candidate)
     )
   );
   const candidatesToInsert = candidates.filter((candidate) => {
@@ -2241,6 +2576,20 @@ function readEnv(name: string) {
   return value;
 }
 
+function readOptionalBooleanEnv(name: string, defaultValue: boolean) {
+  const value = Deno.env.get(name);
+  if (value === undefined || value === "") {
+    return defaultValue;
+  }
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  throw new PublicError("Relationship processing is not configured.", 500);
+}
+
 function readString(value: unknown, field: string) {
   if (typeof value !== "string") {
     throw new Error(`AI response field ${field} must be a string.`);
@@ -2264,21 +2613,38 @@ function readImportance(value: unknown) {
 function readEntityType(value: unknown): EntityType {
   const type = readString(value, "type");
 
-  if (!entityTypes.has(type as EntityType)) {
-    throw new Error("AI response entity type is invalid.");
+  switch (type) {
+    case "person":
+    case "project":
+    case "place":
+    case "habit":
+    case "interest":
+    case "object":
+    case "event":
+    case "value":
+    case "other":
+      return type;
+    default:
+      throw new Error("AI response entity type is invalid.");
   }
-
-  return type as EntityType;
 }
 
 function readConfidence(value: unknown): Confidence {
   const confidence = readString(value, "confidence");
 
-  if (!confidenceLevels.has(confidence as Confidence)) {
-    throw new Error("AI response confidence is invalid.");
+  if (confidence === "low" || confidence === "medium" || confidence === "high") {
+    return confidence;
   }
 
-  return confidence as Confidence;
+  throw new Error("AI response confidence is invalid.");
+}
+
+function readStoredConfidence(value: unknown): StoredConfidence {
+  if (value === "confirmed") {
+    return value;
+  }
+
+  return readConfidence(value);
 }
 
 function readObservationIds(value: unknown, observationIds: Set<string>, field: string) {
@@ -2302,11 +2668,19 @@ function readObservationIds(value: unknown, observationIds: Set<string>, field: 
 function readSensitivity(value: unknown): Sensitivity {
   const sensitivity = readString(value, "sensitivity");
 
-  if (!sensitivityLevels.has(sensitivity as Sensitivity)) {
-    throw new Error("AI response sensitivity is invalid.");
+  if (sensitivity === "normal" || sensitivity === "sensitive") {
+    return sensitivity;
   }
 
-  return sensitivity as Sensitivity;
+  throw new Error("AI response sensitivity is invalid.");
+}
+
+function readNullableString(value: unknown, field: string): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  return readString(value, field);
 }
 
 function normalizeName(value: string) {
@@ -2388,10 +2762,14 @@ function compareDuplicateConfidence(left: DuplicateCandidate["confidence"], righ
 }
 
 function buildContradictionKey(
-  contradiction: Pick<
-    MemoryContradiction,
-    "contradiction_type" | "entity_id" | "existing_content" | "memory_id" | "new_content" | "observation_id"
-  >
+  contradiction: {
+    contradiction_type: string;
+    entity_id: string | null;
+    existing_content: string;
+    memory_id: string | null;
+    new_content: string;
+    observation_id: string | null;
+  }
 ) {
   return [
     contradiction.observation_id ?? "none",
@@ -2424,7 +2802,12 @@ function buildMemoryIdentityKey(content: string, entityId: string | null) {
 }
 
 function buildMemoryEvidenceKey(
-  evidence: Pick<MemoryEvidence, "direction" | "entity_id" | "memory_id" | "observation_id">
+  evidence: {
+    direction: string;
+    entity_id: string | null;
+    memory_id: string | null;
+    observation_id: string;
+  }
 ) {
   return [
     evidence.observation_id,
@@ -2499,10 +2882,6 @@ function hasSensitiveObservation(observations: Observation[]) {
   return observations.some((observation) => observation.sensitivity === "sensitive");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     headers: {
@@ -2514,11 +2893,22 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 class PublicError extends Error {
+  code: ApiErrorCode;
   status: number;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code = inferErrorCode(status)) {
     super(message);
     this.name = "PublicError";
+    this.code = code;
     this.status = status;
   }
+}
+
+function inferErrorCode(status: number): ApiErrorCode {
+  if (status === 401) return "AUTH_REQUIRED";
+  if (status === 403) return "FORBIDDEN";
+  if (status === 404) return "NOT_FOUND";
+  if (status === 502) return "AI_UNAVAILABLE";
+  if (status >= 500) return "INTERNAL_ERROR";
+  return "INVALID_INPUT";
 }

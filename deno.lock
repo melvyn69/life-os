@@ -1,0 +1,41 @@
+{
+  "version": "4",
+  "remote": {
+    "https://esm.sh/@supabase/supabase-js@2.110.1": "3e6ac10368fe97f2b18aab157383635843c15e029846ad33a56bd754d09c2fe0"
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@eslint/js@10.0.1",
+        "npm:@playwright/test@1.61.1",
+        "npm:@supabase/supabase-js@2.110.1",
+        "npm:@tailwindcss/vite@4.3.2",
+        "npm:@tanstack/react-query@5.101.2",
+        "npm:@testing-library/jest-dom@6.9.1",
+        "npm:@testing-library/react@16.3.2",
+        "npm:@testing-library/user-event@14.6.1",
+        "npm:@types/node@26.1.1",
+        "npm:@types/react-dom@19.2.3",
+        "npm:@types/react@19.2.17",
+        "npm:@vitejs/plugin-react@6.0.3",
+        "npm:class-variance-authority@0.7.1",
+        "npm:clsx@2.1.1",
+        "npm:eslint-plugin-react-hooks@7.1.1",
+        "npm:eslint-plugin-react-refresh@0.5.3",
+        "npm:eslint@10.6.0",
+        "npm:globals@17.7.0",
+        "npm:jsdom@29.1.1",
+        "npm:lucide-react@1.23.0",
+        "npm:react-dom@19.2.7",
+        "npm:react-router-dom@7.18.1",
+        "npm:react@19.2.7",
+        "npm:tailwind-merge@3.6.0",
+        "npm:tailwindcss@4.3.2",
+        "npm:typescript-eslint@8.63.0",
+        "npm:typescript@6.0.3",
+        "npm:vite@8.1.3",
+        "npm:vitest@4.1.10"
+      ]
+    }
+  }
+}

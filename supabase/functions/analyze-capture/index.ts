@@ -1,6 +1,13 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.110.1";
+import {
+  createClient,
+  type SupabaseClient
+} from "https://esm.sh/@supabase/supabase-js@2.110.1";
+import type { Database } from "../_shared/database.ts";
+import { isRecord, readOpenAiJsonContent } from "../_shared/life-graph.ts";
+import { logSafeOperation, type ApiErrorCode } from "../_shared/http.ts";
+import { OpenAiRequestError, requestOpenAiJson } from "../_shared/openai.ts";
 
-type LifeOsSupabaseClient = ReturnType<typeof createClient<any>>;
+type LifeOsSupabaseClient = SupabaseClient<Database>;
 type Confidence = "low" | "medium" | "high";
 type Sensitivity = "normal" | "sensitive";
 type ObservationType = "fact" | "preference" | "event" | "emotion" | "goal" | "relationship" | "other";
@@ -30,6 +37,7 @@ const observationTypes = new Set<ObservationType>([
 
 const confidenceLevels = new Set<Confidence>(["low", "medium", "high"]);
 const sensitivityLevels = new Set<Sensitivity>(["normal", "sensitive"]);
+const promptVersion = "life-os-analyze-capture-v2";
 
 const observationSchema = {
   type: "object",
@@ -79,12 +87,25 @@ const systemPrompt = [
 ].join("\n");
 
 Deno.serve(async (request) => {
+  const requestId = crypto.randomUUID();
+  const startedAt = performance.now();
+  let userId: string | null = null;
+  let result: "success" | "failure" = "failure";
+  let observationCount = 0;
+  let errorCode: ApiErrorCode | null = null;
+
   if (request.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
   if (request.method !== "POST") {
-    return jsonResponse({ error: "Method not allowed." }, 405);
+    return jsonResponse({
+      error: {
+        code: "INVALID_INPUT",
+        message: "Method not allowed.",
+        request_id: requestId
+      }
+    }, 405);
   }
 
   try {
@@ -97,10 +118,8 @@ Deno.serve(async (request) => {
 
     const supabaseUrl = readEnv("SUPABASE_URL");
     const supabaseAnonKey = readEnv("SUPABASE_ANON_KEY");
-    const openAiKey = readEnv("OPENAI_API_KEY");
-    const openAiModel = readEnv("OPENAI_MODEL");
 
-    const supabase = createClient<any>(supabaseUrl, supabaseAnonKey, {
+    const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: {
           Authorization: authorization
@@ -115,6 +134,7 @@ Deno.serve(async (request) => {
     }
 
     const user = userData.user;
+    userId = user.id;
 
     const { data: capture, error: captureError } = await supabase
       .from("captures")
@@ -144,21 +164,31 @@ Deno.serve(async (request) => {
 
     if ((existingObservations?.length ?? 0) > 0) {
       await markCaptureAnalyzed(supabase, capture.id, user.id);
+      observationCount = existingObservations?.length ?? 0;
+      result = "success";
       return jsonResponse({ observations: existingObservations ?? [] });
     }
 
     const aiObservations = await extractObservationsWithOpenAi({
-      apiKey: openAiKey,
+      apiKey: readEnv("OPENAI_API_KEY"),
       captureContent: capture.content,
-      model: openAiModel
+      model: readEnv("OPENAI_MODEL")
     });
 
-    const observationsToInsert = aiObservations.map((observation) => ({
+    const observationsToInsert: Array<{
+      capture_id: string;
+      confidence: Confidence;
+      content: string;
+      sensitivity: Sensitivity;
+      status: "suggested";
+      type: ObservationType;
+      user_id: string;
+    }> = aiObservations.map((observation) => ({
       capture_id: capture.id,
       confidence: observation.confidence,
       content: observation.content,
       sensitivity: observation.sensitivity,
-      status: "suggested" as const,
+      status: "suggested",
       type: observation.type,
       user_id: user.id
     }));
@@ -169,10 +199,13 @@ Deno.serve(async (request) => {
 
     await markCaptureAnalyzed(supabase, capture.id, user.id);
 
+    observationCount = insertedObservations.length;
+    result = "success";
     return jsonResponse({ observations: insertedObservations });
   } catch (error) {
     if (error instanceof PublicError) {
-      return jsonResponse({ error: error.message }, error.status);
+      errorCode = error.code;
+      return jsonResponse({ error: { code: error.code, message: error.message, request_id: requestId } }, error.status);
     }
 
     console.error(
@@ -180,7 +213,25 @@ Deno.serve(async (request) => {
       error instanceof Error ? error.name : typeof error
     );
 
-    return jsonResponse({ error: "Unable to analyze this capture right now." }, 500);
+    errorCode = "INTERNAL_ERROR";
+    return jsonResponse({
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Unable to analyze this capture right now.",
+        request_id: requestId
+      }
+    }, 500);
+  } finally {
+    await logSafeOperation({
+      operation: "analyze_capture",
+      requestId,
+      userId,
+      result,
+      durationMs: performance.now() - startedAt,
+      errorCode,
+      promptVersion,
+      metrics: { observations_created_or_returned: observationCount }
+    });
   }
 });
 
@@ -193,55 +244,46 @@ async function extractObservationsWithOpenAi({
   captureContent: string;
   model: string;
 }) {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt
-        },
-        {
-          role: "user",
-          content: `Capture:\n${captureContent}`
-        }
-      ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "life_os_capture_observations",
-          schema: observationSchema,
-          strict: true
+  let completion: unknown;
+  try {
+    completion = await requestOpenAiJson({
+      apiKey,
+      body: {
+        model,
+        messages: [
+          {
+            role: "system",
+            content: systemPrompt
+          },
+          {
+            role: "user",
+            content: `Capture:\n${captureContent}`
+          }
+        ],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "life_os_capture_observations",
+            schema: observationSchema,
+            strict: true
+          }
         }
       }
-    })
-  });
-
-  if (!response.ok) {
-    throw new Error("OpenAI request failed.");
+    });
+  } catch (error) {
+    if (error instanceof OpenAiRequestError && error.failure === "invalid_json") {
+      throw new PublicError("Unable to analyze this capture right now.", 502, "AI_OUTPUT_INVALID");
+    }
+    throw new PublicError("Unable to analyze this capture right now.", 502, "AI_UNAVAILABLE");
   }
-
-  const completion = await response.json();
-  const content = completion?.choices?.[0]?.message?.content;
-
-  if (typeof content !== "string") {
-    throw new Error("OpenAI returned no JSON content.");
-  }
-
-  let parsed: unknown;
 
   try {
-    parsed = JSON.parse(content);
+    const content = readOpenAiJsonContent(completion);
+    const parsed: unknown = JSON.parse(content);
+    return validateAiObservationPayload(parsed);
   } catch {
-    throw new Error("OpenAI returned malformed JSON.");
+    throw new PublicError("Unable to analyze this capture right now.", 502, "AI_OUTPUT_INVALID");
   }
-
-  return validateAiObservationPayload(parsed);
 }
 
 function validateAiObservationPayload(payload: unknown) {
@@ -373,35 +415,38 @@ function readString(value: unknown, field: string) {
 function readObservationType(value: unknown): ObservationType {
   const type = readString(value, "type");
 
-  if (!observationTypes.has(type as ObservationType)) {
-    throw new Error("AI response observation type is invalid.");
+  switch (type) {
+    case "fact":
+    case "preference":
+    case "event":
+    case "emotion":
+    case "goal":
+    case "relationship":
+    case "other":
+      return type;
+    default:
+      throw new Error("AI response observation type is invalid.");
   }
-
-  return type as ObservationType;
 }
 
 function readConfidence(value: unknown): Confidence {
   const confidence = readString(value, "confidence");
 
-  if (!confidenceLevels.has(confidence as Confidence)) {
-    throw new Error("AI response confidence is invalid.");
+  if (confidence === "low" || confidence === "medium" || confidence === "high") {
+    return confidence;
   }
 
-  return confidence as Confidence;
+  throw new Error("AI response confidence is invalid.");
 }
 
 function readSensitivity(value: unknown): Sensitivity {
   const sensitivity = readString(value, "sensitivity");
 
-  if (!sensitivityLevels.has(sensitivity as Sensitivity)) {
-    throw new Error("AI response sensitivity is invalid.");
+  if (sensitivity === "normal" || sensitivity === "sensitive") {
+    return sensitivity;
   }
 
-  return sensitivity as Sensitivity;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  throw new Error("AI response sensitivity is invalid.");
 }
 
 function jsonResponse(body: unknown, status = 200) {
@@ -415,11 +460,22 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 class PublicError extends Error {
+  code: ApiErrorCode;
   status: number;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code = inferErrorCode(status)) {
     super(message);
     this.name = "PublicError";
+    this.code = code;
     this.status = status;
   }
+}
+
+function inferErrorCode(status: number): ApiErrorCode {
+  if (status === 401) return "AUTH_REQUIRED";
+  if (status === 403) return "FORBIDDEN";
+  if (status === 404) return "NOT_FOUND";
+  if (status === 502) return "AI_UNAVAILABLE";
+  if (status >= 500) return "INTERNAL_ERROR";
+  return "INVALID_INPUT";
 }
