@@ -8,7 +8,7 @@ export function BottomNav() {
       aria-label="Primary navigation"
       className="fixed inset-x-0 bottom-0 z-40 mx-auto max-w-xl border-t border-border/80 bg-card/95 px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] pt-2 shadow-[0_-12px_30px_rgba(15,23,42,0.08)] backdrop-blur"
     >
-      <div className="grid grid-cols-7 gap-1">
+      <div className="grid grid-cols-4 gap-1 sm:grid-cols-8">
         {navItems.map((item) => (
           <NavLink
             aria-label={item.label}
@@ -19,7 +19,7 @@ export function BottomNav() {
                 isActive && "bg-primary text-primary-foreground shadow-sm"
               )
             }
-            end={item.path === "/"}
+            end={item.path === "/" || item.path === "/entities" || item.path === "/graph"}
             key={item.path}
             to={item.path}
           >

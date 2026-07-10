@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Archive, Check } from "lucide-react";
+import { Link } from "react-router-dom";
 import { AuthRequiredState } from "@/components/common/AuthRequiredState";
 import { useArchiveEntity, useCorrectEntity, useEntities, useValidateEntity } from "@/hooks/useEntities";
 import { useValidationRequirements } from "@/hooks/useValidationRequirements";
@@ -161,6 +162,10 @@ function EntityCard({
       <div className="mt-3 text-xs text-muted-foreground">
         Updated {formatDate(entity.updated_at)}
       </div>
+
+      <Link className="mt-3 inline-flex min-h-11 items-center text-sm font-semibold text-primary underline-offset-4 hover:underline" to={`/entities/${entity.id}`}>
+        View entity and relationships
+      </Link>
 
       {requiresConfirmation ? (
         <p className="mt-3 text-sm leading-5 text-muted-foreground">

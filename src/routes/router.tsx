@@ -7,6 +7,9 @@ import { Home } from "@/routes/Home";
 import { Inbox } from "@/routes/Inbox";
 import { Memory } from "@/routes/Memory";
 import { Settings } from "@/routes/Settings";
+import { EntityDetailPage } from "@/pages/EntityDetail";
+import { LifeGraphPage } from "@/pages/LifeGraph";
+import { RelationshipReviewPage } from "@/pages/RelationshipReview";
 
 export const router = createBrowserRouter([
   {
@@ -27,6 +30,22 @@ export const router = createBrowserRouter([
       {
         path: "entities",
         element: <Entities />
+      },
+      {
+        path: "entities/:entityId",
+        element: <EntityDetailPage />
+      },
+      {
+        path: "graph",
+        element: <LifeGraphPage />
+      },
+      {
+        path: "graph/:entityId",
+        element: <LifeGraphPage />
+      },
+      {
+        path: "relationships/review",
+        element: <RelationshipReviewPage />
       },
       {
         path: "memory",

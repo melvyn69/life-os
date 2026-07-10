@@ -48,7 +48,7 @@ export async function listSuggestedObservations() {
     throw error;
   }
 
-  return data as SuggestedObservation[];
+  return data;
 }
 
 export async function processObservations(captureId: string) {

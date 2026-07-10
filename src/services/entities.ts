@@ -26,6 +26,22 @@ export async function listEntities() {
   return data;
 }
 
+export async function getEntity(entityId: string) {
+  const userId = await getCurrentUserId();
+  const { data, error } = await supabase
+    .from("entities")
+    .select("*")
+    .eq("id", entityId)
+    .eq("user_id", userId)
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 export async function validateEntity(entityId: string) {
   const { data, error } = await supabase
     .rpc("confirm_entity", { p_entity_id: entityId });
@@ -40,7 +56,7 @@ export async function validateEntity(entityId: string) {
 export async function correctEntity({ entityId, description }: EntityCorrection) {
   const { data, error } = await supabase
     .rpc("correct_entity", {
-      p_description: description,
+      p_description: description ?? "",
       p_entity_id: entityId
     });
 

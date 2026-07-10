@@ -3,6 +3,7 @@ import {
   Inbox,
   Layers3,
   Library,
+  Network,
   PlusCircle,
   Settings,
   Sparkles
@@ -35,6 +36,11 @@ export const navItems: NavItem[] = [
     label: "Entities",
     path: "/entities",
     icon: Layers3
+  },
+  {
+    label: "Graph",
+    path: "/graph",
+    icon: Network
   },
   {
     label: "Memory",

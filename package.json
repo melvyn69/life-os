@@ -6,7 +6,14 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "lint": "eslint .",
     "preview": "vite preview",
+    "test": "vitest run",
+    "test:unit": "vitest run src supabase/functions/_shared",
+    "test:db": "npx supabase test db --local supabase/tests/database",
+    "test:edge": "bash scripts/test-edge-functions.sh",
+    "test:e2e": "bash scripts/test-e2e.sh",
+    "test:migration": "bash scripts/test-life-graph-migration.sh",
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
@@ -21,13 +28,25 @@
     "tailwind-merge": "3.6.0"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.61.1",
     "@tailwindcss/vite": "4.3.2",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
     "@types/node": "26.1.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
+    "eslint": "10.6.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.3",
+    "globals": "17.7.0",
+    "jsdom": "29.1.1",
     "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
-    "vite": "8.1.3"
+    "typescript-eslint": "8.63.0",
+    "vite": "8.1.3",
+    "vitest": "4.1.10"
   }
 }

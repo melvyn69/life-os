@@ -15,12 +15,6 @@ export type BriefingContent = {
   suggestedFocus: string;
 };
 
-type StoredBriefingContent = {
-  summary?: unknown;
-  sections?: unknown;
-  suggested_focus?: unknown;
-};
-
 type GenerateBriefingResponse = {
   briefing: Briefing;
 };
@@ -67,7 +61,10 @@ export async function generateBriefing() {
 
 export function parseBriefingContent(briefing: Briefing): BriefingContent {
   try {
-    const parsed = JSON.parse(briefing.content) as StoredBriefingContent;
+    const parsed: unknown = JSON.parse(briefing.content);
+    if (!isRecord(parsed)) {
+      throw new Error("Stored briefing content is invalid.");
+    }
     const summary = typeof parsed.summary === "string" ? parsed.summary : briefing.content;
     const suggestedFocus = typeof parsed.suggested_focus === "string" ? parsed.suggested_focus : "";
     const sections = Array.isArray(parsed.sections)

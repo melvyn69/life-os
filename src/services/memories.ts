@@ -29,7 +29,7 @@ export async function listMemories() {
     throw error;
   }
 
-  return data as MemoryWithEntity[];
+  return data;
 }
 
 export async function validateMemory(memoryId: string) {

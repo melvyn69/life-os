@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { archiveEntity, correctEntity, listEntities, validateEntity } from "@/services/entities";
+import { archiveEntity, correctEntity, getEntity, listEntities, validateEntity } from "@/services/entities";
 
 export const entitiesQueryKey = ["entities"] as const;
 
@@ -7,6 +7,14 @@ export function useEntities() {
   return useQuery({
     queryKey: entitiesQueryKey,
     queryFn: listEntities
+  });
+}
+
+export function useEntity(entityId: string) {
+  return useQuery({
+    queryKey: ["entities", entityId],
+    queryFn: () => getEntity(entityId),
+    enabled: Boolean(entityId)
   });
 }
 
