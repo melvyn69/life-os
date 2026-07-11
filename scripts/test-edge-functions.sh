@@ -2,12 +2,17 @@
 
 set -euo pipefail
 
-supabase_path="/usr/local/opt/node@20/bin:/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-eval "$(PATH="$supabase_path" npx supabase status -o env 2>/dev/null)"
+if [[ -d "/Applications/Docker.app/Contents/Resources/bin" ]]; then
+  export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+fi
+
+supabase_cli=(npx --yes supabase@2.109.1)
+
+eval "$("${supabase_cli[@]}" status -o env 2>/dev/null)"
 export API_URL ANON_KEY SERVICE_ROLE_KEY JWT_SECRET
 
 log_file="$(mktemp)"
-PATH="$supabase_path" npx supabase functions serve --env-file .env.local >"$log_file" 2>&1 &
+"${supabase_cli[@]}" functions serve --env-file .env.local >"$log_file" 2>&1 &
 serve_pid=$!
 
 cleanup() {
@@ -36,4 +41,4 @@ for _ in {1..30}; do
   sleep 0.5
 done
 
-/Users/melvyn/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node scripts/test-edge-functions.mjs
+node scripts/test-edge-functions.mjs

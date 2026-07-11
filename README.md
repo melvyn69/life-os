@@ -54,6 +54,8 @@ Neither control deletes relationship data, evidence, or history.
 
 ## Validation
 
+Use Node.js 22 or newer, with Docker and the Supabase CLI available locally.
+
 Run the v0.3 validation surfaces against the local Supabase stack:
 
 ```bash
@@ -67,4 +69,4 @@ npm run test:migration
 npm run test:e2e
 ```
 
-Edge Functions additionally support Deno type validation with the repository's Supabase-compatible Deno 2.1 runtime.
+Edge Functions additionally support type validation with a Supabase-compatible Deno 2 runtime.

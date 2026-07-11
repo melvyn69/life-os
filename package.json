@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -10,7 +13,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:unit": "vitest run src supabase/functions/_shared",
-    "test:db": "npx supabase test db --local supabase/tests/database",
+    "test:db": "bash scripts/run-supabase.sh test db --local supabase/tests/database",
     "test:edge": "bash scripts/test-edge-functions.sh",
     "test:e2e": "bash scripts/test-e2e.sh",
     "test:migration": "bash scripts/test-life-graph-migration.sh",
