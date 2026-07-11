@@ -11,7 +11,11 @@ import {
   validateAiRelationships
 } from "../_shared/life-graph.ts";
 import { logSafeOperation, type ApiErrorCode } from "../_shared/http.ts";
-import { OpenAiRequestError, requestOpenAiJson } from "../_shared/openai.ts";
+import {
+  maximumOpenAiCompletionTokens,
+  OpenAiRequestError,
+  requestOpenAiJson
+} from "../_shared/openai.ts";
 
 type LifeOsSupabaseClient = SupabaseClient<Database>;
 type Confidence = "low" | "medium" | "high";
@@ -194,6 +198,9 @@ const corsHeaders = {
 };
 
 const promptVersion = "life-os-process-observations-v4";
+const maximumCaptureLength = 12_000;
+const maximumObservationsPerAnalysis = 30;
+const maximumExistingEntitiesPerAnalysis = 100;
 
 const entityTypes = new Set<EntityType>([
   "person",
@@ -430,7 +437,8 @@ Deno.serve(async (request) => {
       .eq("capture_id", capture.id)
       .eq("user_id", user.id)
       .eq("status", "suggested")
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: true })
+      .limit(maximumObservationsPerAnalysis + 1);
 
     if (observationsError) {
       throw observationsError;
@@ -445,9 +453,9 @@ Deno.serve(async (request) => {
     if (suggestedObservations.length === 0) {
       result = "success";
       return jsonResponse({
-        entities: { created: 0, updated: 0, duplicates: 0 },
-        memories: { created: 0, updated: 0 },
-        relationships: {
+        entities: [],
+        memories: [],
+        relationship_stats: {
           created: 0,
           evidence_added: 0,
           promoted: 0,
@@ -458,11 +466,21 @@ Deno.serve(async (request) => {
       });
     }
 
+    if (capture.content.length > maximumCaptureLength) {
+      throw new PublicError("Capture is too large to process safely.", 400, "INVALID_INPUT");
+    }
+
+    if (suggestedObservations.length > maximumObservationsPerAnalysis) {
+      throw new PublicError("Capture has too many observations to process safely.", 400, "INVALID_INPUT");
+    }
+
     const { data: existingEntities, error: entitiesError } = await supabase
       .from("entities")
       .select("id, name, type, description, confidence, sensitivity, status")
       .eq("user_id", user.id)
-      .in("status", ["suggested", "active", "confirmed"]);
+      .in("status", ["suggested", "active", "confirmed"])
+      .order("updated_at", { ascending: false })
+      .limit(maximumExistingEntitiesPerAnalysis);
 
     if (entitiesError) {
       throw entitiesError;
@@ -680,21 +698,13 @@ Deno.serve(async (request) => {
     result = "success";
 
     return jsonResponse({
-      entities: {
-        created: insertedEntities.length,
-        updated: entityMatchBySuggestedName.size,
-        duplicates: insertedDuplicateCandidates.length
-      },
-      memories: {
-        created: insertedMemories.length,
-        updated: matchedMemoryEvidence.length
-      },
-      relationships: relationshipStats,
-      living_memory: {
-        confidence_changes: confidenceChanges.length,
-        contradictions: insertedContradictions.length,
-        evidence_added: insertedEvidence.length
-      },
+      confidence_changes: confidenceChanges,
+      contradictions: insertedContradictions,
+      duplicate_candidates: insertedDuplicateCandidates,
+      evidence: insertedEvidence,
+      entities: insertedEntities,
+      memories: insertedMemories,
+      relationship_stats: relationshipStats,
       prompt_version: promptVersion
     });
   } catch (error) {
@@ -757,6 +767,7 @@ async function suggestEntitiesAndMemoriesWithOpenAi({
       apiKey,
       body: {
         model,
+        max_completion_tokens: maximumOpenAiCompletionTokens,
         messages: [
           {
             role: "system",
@@ -796,6 +807,9 @@ async function suggestEntitiesAndMemoriesWithOpenAi({
       }
     });
   } catch (error) {
+    if (error instanceof OpenAiRequestError && error.failure === "input_too_large") {
+      throw new PublicError("Capture is too large to process safely.", 400, "INVALID_INPUT");
+    }
     if (error instanceof OpenAiRequestError && error.failure === "invalid_json") {
       throw new PublicError("Unable to suggest memory right now.", 502, "AI_OUTPUT_INVALID");
     }
@@ -2684,7 +2698,7 @@ function readNullableString(value: unknown, field: string): string | null {
 }
 
 function normalizeName(value: string) {
-  return value.trim().toLocaleLowerCase();
+  return value.trim().toLowerCase();
 }
 
 function getNormalizedNameParts(value: string) {
@@ -2782,7 +2796,7 @@ function buildContradictionKey(
 }
 
 function buildMemoryKey(observationId: string | null, content: string) {
-  return `${observationId ?? "none"}:${content.trim().toLocaleLowerCase()}`;
+  return `${observationId ?? "none"}:${content.trim().toLowerCase()}`;
 }
 
 function findExistingMemoryMatch(
@@ -2862,7 +2876,7 @@ function normalizeRole(value: string) {
 function normalizeFactValue(value: string) {
   return value
     .trim()
-    .toLocaleLowerCase()
+    .toLowerCase()
     .replace(/[^\p{L}\p{N}\s/-]/gu, "")
     .replace(/\s+/g, " ");
 }

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { OpenAiRequestError, requestOpenAiJson } from "./openai";
+import {
+  maximumOpenAiRequestBodyLength,
+  maximumOpenAiResponseBodyLength,
+  OpenAiRequestError,
+  requestOpenAiJson
+} from "./openai";
 
 describe("OpenAI transport boundary", () => {
   it("returns parsed JSON for a successful response", async () => {
@@ -25,6 +30,32 @@ describe("OpenAI transport boundary", () => {
       apiKey: "test-key",
       body: {},
       fetcher: async () => new Response("not-json", { status: 200 })
+    })).rejects.toMatchObject<Partial<OpenAiRequestError>>({ failure: "invalid_json" });
+  });
+
+  it("rejects an oversized request before network access", async () => {
+    let requested = false;
+
+    await expect(requestOpenAiJson({
+      apiKey: "test-key",
+      body: { content: "x".repeat(maximumOpenAiRequestBodyLength + 1) },
+      fetcher: async () => {
+        requested = true;
+        return new Response("{}", { status: 200 });
+      }
+    })).rejects.toMatchObject<Partial<OpenAiRequestError>>({ failure: "input_too_large" });
+
+    expect(requested).toBe(false);
+  });
+
+  it("rejects an oversized response before parsing it", async () => {
+    await expect(requestOpenAiJson({
+      apiKey: "test-key",
+      body: {},
+      fetcher: async () => new Response(
+        JSON.stringify({ content: "x".repeat(maximumOpenAiResponseBodyLength) }),
+        { status: 200 }
+      )
     })).rejects.toMatchObject<Partial<OpenAiRequestError>>({ failure: "invalid_json" });
   });
 

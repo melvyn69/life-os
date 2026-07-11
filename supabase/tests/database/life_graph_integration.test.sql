@@ -62,6 +62,22 @@ select isnt(
   'temporal context participates in the fingerprint'
 );
 
+select isnt(
+  life_os_internal.relationship_fingerprint(
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'a1000000-0000-4000-8000-000000000001',
+    'a2000000-0000-4000-8000-000000000002',
+    'contributes_to', null, null
+  ),
+  life_os_internal.relationship_fingerprint(
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'a2000000-0000-4000-8000-000000000002',
+    'a1000000-0000-4000-8000-000000000001',
+    'contributes_to', null, null
+  ),
+  'directional relationship fingerprints preserve source and target order'
+);
+
 set local role service_role;
 
 select lives_ok($sql$
@@ -109,6 +125,12 @@ select is(
   (select count(*)::integer from public.relationship_evidence evidence join public.relationships relationship on relationship.id = evidence.relationship_id where relationship.relationship_type = 'contributes_to' and evidence.evidence_kind = 'user_declaration'),
   1,
   'relationship evidence is idempotent'
+);
+
+select is(
+  (select count(*)::integer from public.relationship_history history join public.relationships relationship on relationship.id = history.relationship_id where relationship.relationship_type = 'contributes_to' and history.action = 'created'),
+  1,
+  'relationship creation history is idempotent'
 );
 
 select throws_ok($sql$
@@ -308,6 +330,16 @@ select lives_ok($sql$
   select public.confirm_relationship((select id from public.relationships where relationship_type = 'affiliated_with'))
 $sql$, 'the user can confirm an owned relationship');
 
+select lives_ok($sql$
+  select public.confirm_relationship((select id from public.relationships where relationship_type = 'affiliated_with'))
+$sql$, 'repeating confirmation of an already confirmed relationship is idempotent');
+
+select is(
+  (select count(*)::integer from public.relationship_history history join public.relationships relationship on relationship.id = history.relationship_id where relationship.relationship_type = 'affiliated_with' and history.action = 'confirmed'),
+  1,
+  'repeated confirmation does not append duplicate history'
+);
+
 select results_eq(
   $sql$ select confidence, status from public.relationships where relationship_type = 'affiliated_with' $sql$,
   $sql$ values ('confirmed'::text, 'confirmed'::text) $sql$,
@@ -333,6 +365,63 @@ select results_eq(
   $sql$ values ('confirmed'::text, 'contradicted'::text) $sql$,
   'contradiction changes status without lowering confirmed confidence'
 );
+
+reset role;
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","role":"authenticated"}', true);
+
+select lives_ok($sql$
+  select public.confirm_relationship((select id from public.relationships where relationship_type = 'affiliated_with'))
+$sql$, 'the user can explicitly reconfirm a contradicted relationship');
+
+select results_eq(
+  $sql$ select confidence, status from public.relationships where relationship_type = 'affiliated_with' $sql$,
+  $sql$ values ('confirmed'::text, 'confirmed'::text) $sql$,
+  'reconfirmation restores confirmed status without changing confirmed confidence'
+);
+
+select is(
+  (select count(*)::integer from public.relationship_history history join public.relationships relationship on relationship.id = history.relationship_id where relationship.relationship_type = 'affiliated_with' and history.action = 'confirmed'),
+  2,
+  'reconfirmation appends one new decision history entry'
+);
+
+select is(
+  (select count(*)::integer from public.relationship_evidence evidence join public.relationships relationship on relationship.id = evidence.relationship_id where relationship.relationship_type = 'affiliated_with' and evidence.evidence_kind = 'user_decision' and evidence.relation_to_claim = 'supporting'),
+  2,
+  'reconfirmation after a contradiction appends distinct immutable decision evidence'
+);
+
+reset role;
+set local role service_role;
+
+select lives_ok($sql$
+  select public.ingest_relationship_candidate(
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'a1000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000004',
+    'affiliated_with', 'explicit',
+    array['21000000-0000-4000-8000-000000000002'::uuid],
+    'contradicting'
+  )
+$sql$, 'retrying already ingested contradictory evidence is idempotent');
+
+select results_eq(
+  $sql$ select confidence, status from public.relationships where relationship_type = 'affiliated_with' $sql$,
+  $sql$ values ('confirmed'::text, 'confirmed'::text) $sql$,
+  'an ingestion retry cannot undo an explicit user reconfirmation'
+);
+
+select lives_ok($sql$
+  select public.ingest_relationship_candidate(
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'a1000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000004',
+    'affiliated_with', 'explicit',
+    array['31000000-0000-4000-8000-000000000003'::uuid],
+    'contradicting'
+  )
+$sql$, 'new contradictory evidence can require review again after reconfirmation');
 
 reset role;
 set local role authenticated;
@@ -364,6 +453,38 @@ select ok(
 );
 
 select lives_ok($sql$
+  select public.correct_relationship(
+    (select id from public.relationships where relationship_type = 'participates_in'),
+    'participates_in',
+    'a1000000-0000-4000-8000-000000000001',
+    'a4000000-0000-4000-8000-000000000004',
+    null, null, 'unknown', 'The user corrected the relationship type.'
+  )
+$sql$, 'repeating the same canonical correction is idempotent');
+
+select is(
+  (select count(*)::integer from public.relationship_history history join public.relationships relationship on relationship.id = history.relationship_id where relationship.relationship_type = 'participates_in' and history.action = 'corrected'),
+  1,
+  'repeating a correction does not append duplicate history'
+);
+
+select lives_ok($sql$
+  select public.correct_relationship(
+    (select id from public.relationships where relationship_type = 'created'),
+    'temporally_associated_with',
+    'a1000000-0000-4000-8000-000000000001',
+    'a3000000-0000-4000-8000-000000000003',
+    null, null, 'unknown', 'The user corrected the target entity.'
+  )
+$sql$, 'a user correction can point to another owned entity');
+
+select results_eq(
+  $sql$ select sensitivity, confidence, status from public.relationships where relationship_type = 'temporally_associated_with' $sql$,
+  $sql$ values ('sensitive'::text, 'confirmed'::text, 'confirmed'::text) $sql$,
+  'server-side correction recalculates maximum sensitivity without lowering confidence'
+);
+
+select lives_ok($sql$
   select public.mark_relationship_outdated(
     (select id from public.relationships where relationship_type = 'participates_in'),
     '2026-06-30', 'exact'
@@ -374,6 +495,19 @@ select results_eq(
   $sql$ select confidence, status, end_date::text from public.relationships where relationship_type = 'participates_in' $sql$,
   $sql$ values ('confirmed'::text, 'outdated'::text, '2026-06-30'::text) $sql$,
   'outdated status preserves confirmed confidence and the end date'
+);
+
+select lives_ok($sql$
+  select public.mark_relationship_outdated(
+    (select id from public.relationships where relationship_type = 'participates_in'),
+    '2026-06-30', 'exact'
+  )
+$sql$, 'repeating the same outdated decision is idempotent');
+
+select is(
+  (select count(*)::integer from public.relationship_history history join public.relationships relationship on relationship.id = history.relationship_id where relationship.relationship_type = 'participates_in' and history.action = 'marked_outdated'),
+  1,
+  'repeating an outdated decision does not append duplicate history'
 );
 
 select lives_ok($sql$
@@ -476,17 +610,17 @@ where relationship_type = 'participates_in';
 select throws_ok($sql$
   delete from public.relationship_evidence
   where relationship_id = (select id from public.relationships where relationship_type = 'participates_in')
-$sql$, '42501', 'FORBIDDEN', 'normal service paths cannot delete immutable evidence');
+$sql$, '42501', 'permission denied for table relationship_evidence', 'normal service paths cannot delete immutable evidence');
 
 select throws_ok($sql$
   delete from public.relationship_history
   where relationship_id = (select id from public.relationships where relationship_type = 'participates_in')
-$sql$, '42501', 'FORBIDDEN', 'normal service paths cannot delete immutable history');
+$sql$, '42501', 'permission denied for table relationship_history', 'normal service paths cannot delete immutable history');
 
 select throws_ok($sql$
   delete from public.relationships
   where relationship_type = 'participates_in'
-$sql$, '42501', 'FORBIDDEN', 'normal service paths cannot physically delete relationships');
+$sql$, '42501', 'permission denied for table relationships', 'normal service paths cannot physically delete relationships');
 
 reset role;
 set local role authenticated;
@@ -523,6 +657,44 @@ select ok(
   (public.get_relationship_detail((select id from public.relationships where relationship_type = 'participates_in'), null, null, 20) ?& array['relationship', 'source_entity', 'target_entity', 'evidence_summary', 'evidence', 'history', 'contradictions', 'actions', 'page_info']),
   'relationship detail returns the complete bounded contract'
 );
+
+select is(
+  cardinality(string_to_array(
+    public.get_focused_graph('a1000000-0000-4000-8000-000000000001', 1, null, 1, true, false) #>> '{page_info,next_cursor}',
+    '|'
+  )),
+  5,
+  'focused graph cursor encodes all five canonical ordering criteria'
+);
+
+select isnt(
+  public.get_focused_graph('a1000000-0000-4000-8000-000000000001', 1, null, 1, true, false) #>> '{edges,0,id}',
+  public.get_focused_graph(
+    'a1000000-0000-4000-8000-000000000001',
+    1,
+    public.get_focused_graph('a1000000-0000-4000-8000-000000000001', 1, null, 1, true, false) #>> '{page_info,next_cursor}',
+    1,
+    true,
+    false
+  ) #>> '{edges,0,id}',
+  'focused graph cursor advances without returning the previous edge'
+);
+
+select throws_ok($sql$
+  select public.get_focused_graph(
+    'a1000000-0000-4000-8000-000000000001', 1, null, null, true, false
+  )
+$sql$, '22023', 'INVALID_INPUT', 'focused graph rejects a null limit instead of running unbounded');
+
+select throws_ok($sql$
+  select public.get_relationship_detail(
+    (select id from public.relationships where relationship_type = 'participates_in'), null, null, null
+  )
+$sql$, '22023', 'INVALID_INPUT', 'relationship detail rejects a null limit instead of running unbounded');
+
+select throws_ok($sql$
+  select public.get_relationship_review_queue('suggestions', null, null)
+$sql$, '22023', 'INVALID_INPUT', 'relationship review rejects a null limit instead of running unbounded');
 
 select * from finish();
 rollback;

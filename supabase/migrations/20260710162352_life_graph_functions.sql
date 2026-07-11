@@ -431,7 +431,7 @@ begin
 
   raise log '%', jsonb_build_object(
     'operation', left(p_operation, 100),
-    'request_id', request_id,
+    'request_id', left(request_id, 100),
     'user_ref', encode(digest(convert_to(p_user_id::text, 'UTF8'), 'sha256'), 'hex'),
     'relationship_id', p_relationship_id,
     'result', left(p_result, 50),
@@ -528,9 +528,14 @@ declare
   previous_relationship public.relationships;
   updated_relationship public.relationships;
   decision_evidence_id uuid;
+  decision_source_fingerprint text;
 begin
   if current_user_id is null then
     raise exception 'AUTH_REQUIRED' using errcode = '42501';
+  end if;
+
+  if p_relationship_id is null then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
   select *
@@ -552,6 +557,19 @@ begin
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
+  select
+    'user-decision:confirm:' || previous_relationship.id::text || ':' ||
+    coalesce((
+      select relationship_history.id::text
+      from public.relationship_history
+      where relationship_history.relationship_id = previous_relationship.id
+        and relationship_history.user_id = current_user_id
+        and relationship_history.action = 'contradicted'
+      order by relationship_history.created_at desc, relationship_history.id desc
+      limit 1
+    ), 'initial')
+  into decision_source_fingerprint;
+
   insert into public.relationship_evidence (
     user_id,
     relationship_id,
@@ -568,12 +586,21 @@ begin
     'supporting',
     'explicit',
     previous_relationship.sensitivity,
-    'user-decision:confirm:' || previous_relationship.id::text,
+    decision_source_fingerprint,
     now()
   )
   on conflict (relationship_id, source_fingerprint, relation_to_claim)
-  do update set relationship_id = excluded.relationship_id
+  do nothing
   returning id into decision_evidence_id;
+
+  if decision_evidence_id is null then
+    select relationship_evidence.id
+    into decision_evidence_id
+    from public.relationship_evidence
+    where relationship_evidence.relationship_id = previous_relationship.id
+      and relationship_evidence.source_fingerprint = decision_source_fingerprint
+      and relationship_evidence.relation_to_claim = 'supporting';
+  end if;
 
   perform set_config('life_os.relationship_operation', 'confirm', true);
 
@@ -662,8 +689,18 @@ begin
     now()
   )
   on conflict (relationship_id, source_fingerprint, relation_to_claim)
-  do update set relationship_id = excluded.relationship_id
+  do nothing
   returning id into decision_evidence_id;
+
+  if decision_evidence_id is null then
+    select relationship_evidence.id
+    into decision_evidence_id
+    from public.relationship_evidence
+    where relationship_evidence.relationship_id = previous_relationship.id
+      and relationship_evidence.source_fingerprint =
+        'user-decision:reject:' || previous_relationship.id::text
+      and relationship_evidence.relation_to_claim = 'contradicting';
+  end if;
 
   perform set_config('life_os.relationship_operation', 'reject', true);
 
@@ -709,9 +746,23 @@ declare
   previous_relationship public.relationships;
   updated_relationship public.relationships;
   decision_evidence_id uuid;
+  normalized_source_entity_id uuid := p_source_entity_id;
+  normalized_target_entity_id uuid := p_target_entity_id;
+  swapped_entity_id uuid;
+  corrected_sensitivity text;
+  correction_source_fingerprint text;
 begin
   if current_user_id is null then
     raise exception 'AUTH_REQUIRED' using errcode = '42501';
+  end if;
+
+  if p_relationship_id is null
+    or p_relationship_type is null
+    or p_source_entity_id is null
+    or p_target_entity_id is null
+    or p_date_precision is null
+  then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
   if p_relationship_type not in (
@@ -739,16 +790,24 @@ begin
     raise exception 'INVALID_TEMPORAL_RANGE' using errcode = '22023';
   end if;
 
+  if p_relationship_type = 'contextually_associated_with'
+    and normalized_source_entity_id::text > normalized_target_entity_id::text
+  then
+    swapped_entity_id := normalized_source_entity_id;
+    normalized_source_entity_id := normalized_target_entity_id;
+    normalized_target_entity_id := swapped_entity_id;
+  end if;
+
   if not exists (
     select 1
     from public.entities
-    where entities.id = p_source_entity_id
+    where entities.id = normalized_source_entity_id
       and entities.user_id = current_user_id
       and entities.status <> 'deleted'
   ) or not exists (
     select 1
     from public.entities
-    where entities.id = p_target_entity_id
+    where entities.id = normalized_target_entity_id
       and entities.user_id = current_user_id
       and entities.status <> 'deleted'
   ) then
@@ -770,6 +829,40 @@ begin
     raise exception 'RELATIONSHIP_ARCHIVED' using errcode = '22023';
   end if;
 
+  if previous_relationship.status = 'confirmed'
+    and previous_relationship.confidence = 'confirmed'
+    and previous_relationship.relationship_type = p_relationship_type
+    and previous_relationship.source_entity_id = normalized_source_entity_id
+    and previous_relationship.target_entity_id = normalized_target_entity_id
+    and previous_relationship.start_date is not distinct from p_start_date
+    and previous_relationship.end_date is not distinct from p_end_date
+    and previous_relationship.date_precision = p_date_precision
+  then
+    return previous_relationship;
+  end if;
+
+  corrected_sensitivity := previous_relationship.sensitivity;
+  if corrected_sensitivity = 'normal' and exists (
+    select 1
+    from public.entities
+    where entities.id in (normalized_source_entity_id, normalized_target_entity_id)
+      and entities.user_id = current_user_id
+      and entities.sensitivity = 'sensitive'
+  ) then
+    corrected_sensitivity := 'sensitive';
+  end if;
+
+  correction_source_fingerprint :=
+    'user-decision:correct:' || previous_relationship.id::text || ':' ||
+    life_os_internal.relationship_fingerprint(
+      current_user_id,
+      normalized_source_entity_id,
+      normalized_target_entity_id,
+      p_relationship_type,
+      p_start_date,
+      p_end_date
+    ) || ':' || p_date_precision;
+
   insert into public.relationship_evidence (
     user_id,
     relationship_id,
@@ -786,22 +879,23 @@ begin
     'user_decision',
     'supporting',
     'explicit',
-    previous_relationship.sensitivity,
-    'user-decision:correct:' || previous_relationship.id::text || ':' ||
-      life_os_internal.relationship_fingerprint(
-        current_user_id,
-        least(p_source_entity_id::text, p_target_entity_id::text)::uuid,
-        greatest(p_source_entity_id::text, p_target_entity_id::text)::uuid,
-        p_relationship_type,
-        p_start_date,
-        p_end_date
-      ),
+    corrected_sensitivity,
+    correction_source_fingerprint,
     nullif(left(trim(coalesce(p_reason, '')), 500), ''),
     now()
   )
   on conflict (relationship_id, source_fingerprint, relation_to_claim)
-  do update set relationship_id = excluded.relationship_id
+  do nothing
   returning id into decision_evidence_id;
+
+  if decision_evidence_id is null then
+    select relationship_evidence.id
+    into decision_evidence_id
+    from public.relationship_evidence
+    where relationship_evidence.relationship_id = previous_relationship.id
+      and relationship_evidence.source_fingerprint = correction_source_fingerprint
+      and relationship_evidence.relation_to_claim = 'supporting';
+  end if;
 
   perform set_config('life_os.relationship_operation', 'correct', true);
 
@@ -809,11 +903,12 @@ begin
     update public.relationships
     set
       relationship_type = p_relationship_type,
-      source_entity_id = p_source_entity_id,
-      target_entity_id = p_target_entity_id,
+      source_entity_id = normalized_source_entity_id,
+      target_entity_id = normalized_target_entity_id,
       start_date = p_start_date,
       end_date = p_end_date,
       date_precision = p_date_precision,
+      sensitivity = corrected_sensitivity,
       status = 'confirmed',
       confidence = 'confirmed',
       last_confirmed_at = now()
@@ -856,9 +951,15 @@ declare
   previous_relationship public.relationships;
   updated_relationship public.relationships;
   decision_evidence_id uuid;
+  target_end_date date;
+  outdated_source_fingerprint text;
 begin
   if current_user_id is null then
     raise exception 'AUTH_REQUIRED' using errcode = '42501';
+  end if;
+
+  if p_relationship_id is null or p_date_precision is null then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
   if p_date_precision not in ('unknown', 'approximate', 'exact') then
@@ -887,12 +988,18 @@ begin
     raise exception 'INVALID_TEMPORAL_RANGE' using errcode = '22023';
   end if;
 
+  target_end_date := coalesce(p_end_date, previous_relationship.end_date);
+
   if previous_relationship.status = 'outdated'
-    and previous_relationship.end_date is not distinct from p_end_date
+    and previous_relationship.end_date is not distinct from target_end_date
     and previous_relationship.date_precision = p_date_precision
   then
     return previous_relationship;
   end if;
+
+  outdated_source_fingerprint :=
+    'user-decision:outdated:' || previous_relationship.id::text || ':' ||
+    coalesce(target_end_date::text, 'unknown') || ':' || p_date_precision;
 
   insert into public.relationship_evidence (
     user_id,
@@ -910,19 +1017,28 @@ begin
     'supporting',
     'explicit',
     previous_relationship.sensitivity,
-    'user-decision:outdated:' || previous_relationship.id::text || ':' || coalesce(p_end_date::text, 'unknown'),
+    outdated_source_fingerprint,
     now()
   )
   on conflict (relationship_id, source_fingerprint, relation_to_claim)
-  do update set relationship_id = excluded.relationship_id
+  do nothing
   returning id into decision_evidence_id;
+
+  if decision_evidence_id is null then
+    select relationship_evidence.id
+    into decision_evidence_id
+    from public.relationship_evidence
+    where relationship_evidence.relationship_id = previous_relationship.id
+      and relationship_evidence.source_fingerprint = outdated_source_fingerprint
+      and relationship_evidence.relation_to_claim = 'supporting';
+  end if;
 
   perform set_config('life_os.relationship_operation', 'outdate', true);
 
   update public.relationships
   set
     status = 'outdated',
-    end_date = coalesce(p_end_date, end_date),
+    end_date = target_end_date,
     date_precision = p_date_precision
   where id = previous_relationship.id
     and user_id = current_user_id
@@ -960,6 +1076,10 @@ declare
 begin
   if current_user_id is null then
     raise exception 'AUTH_REQUIRED' using errcode = '42501';
+  end if;
+
+  if p_relationship_id is null or p_is_visible is null then
+    raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
   select *
@@ -1179,8 +1299,18 @@ declare
   promoted_count integer := 0;
   contradicted_count integer := 0;
   evidence_hash text;
+  relationship_was_created boolean := false;
 begin
-  if p_user_id is null then
+  if p_user_id is null
+    or p_source_entity_id is null
+    or p_target_entity_id is null
+    or p_relationship_type is null
+    or p_explicitness is null
+    or p_observation_ids is null
+    or p_relation_to_claim is null
+    or p_date_precision is null
+    or p_sensitivity is null
+  then
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
@@ -1348,6 +1478,7 @@ begin
       where observations.id = any(p_observation_ids)
         and observations.user_id = p_user_id
       returning * into current_relationship;
+      relationship_was_created := true;
     exception
       when unique_violation then
         select *
@@ -1363,19 +1494,21 @@ begin
       raise exception 'DUPLICATE_RELATIONSHIP' using errcode = '23505';
     end if;
 
-    created_count := 1;
+    if relationship_was_created then
+      created_count := 1;
 
-    perform life_os_internal.record_relationship_history(
-      current_relationship.id,
-      p_user_id,
-      'created',
-      'ai',
-      null,
-      null,
-      life_os_internal.relationship_snapshot(current_relationship),
-      'A relationship candidate was created from validated structured output.',
-      '{}'::uuid[]
-    );
+      perform life_os_internal.record_relationship_history(
+        current_relationship.id,
+        p_user_id,
+        'created',
+        'ai',
+        null,
+        null,
+        life_os_internal.relationship_snapshot(current_relationship),
+        'A relationship candidate was created from validated structured output.',
+        '{}'::uuid[]
+      );
+    end if;
   end if;
 
   previous_relationship := current_relationship;
@@ -1496,7 +1629,32 @@ begin
     evidence_set_hash = evidence_hash
   where id = current_relationship.id
     and user_id = p_user_id
+    and (
+      cardinality(inserted_evidence_ids) > 0
+      or evidence_set_hash is distinct from evidence_hash
+      or (
+        sensitivity = 'normal'
+        and relationship_sensitivity in ('sensitive', 'highly_sensitive')
+      )
+      or (
+        sensitivity = 'sensitive'
+        and relationship_sensitivity = 'highly_sensitive'
+      )
+      or (
+        explanation is null
+        and nullif(left(trim(coalesce(p_explanation, '')), 1000), '') is not null
+      )
+    )
   returning * into current_relationship;
+
+  if not found then
+    select *
+    into current_relationship
+    from public.relationships
+    where id = previous_relationship.id
+      and user_id = p_user_id
+    for update;
+  end if;
 
   if cardinality(inserted_evidence_ids) > 0 then
     perform life_os_internal.record_relationship_history(
@@ -1515,6 +1673,7 @@ begin
   previous_relationship := current_relationship;
 
   if p_relation_to_claim = 'contradicting'
+    and cardinality(inserted_evidence_ids) > 0
     and current_relationship.status not in ('rejected', 'archived', 'contradicted')
   then
     perform set_config('life_os.relationship_operation', 'ingest', true);
@@ -1626,6 +1785,8 @@ declare
   cursor_parts text[];
   cursor_priority integer;
   cursor_updated_at timestamptz;
+  cursor_independent_evidence_count bigint;
+  cursor_current_temporal_priority integer;
   cursor_id uuid;
   effective_limit integer;
   node_limit integer;
@@ -1635,7 +1796,17 @@ begin
     raise exception 'AUTH_REQUIRED' using errcode = '42501';
   end if;
 
-  if p_depth < 1 or p_depth > 2 or p_limit < 1 or p_limit > 30 then
+  if p_focus_entity_id is null
+    or p_depth is null
+    or p_limit is null
+    or p_include_suggestions is null
+    or p_include_historical is null
+    or p_depth < 1
+    or p_depth > 2
+    or p_limit < 1
+    or p_limit > 30
+    or length(coalesce(p_cursor, '')) > 512
+  then
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
@@ -1653,21 +1824,30 @@ begin
   if p_cursor is not null then
     cursor_parts := string_to_array(p_cursor, '|');
 
-    if cardinality(cursor_parts) <> 3 then
+    if cardinality(cursor_parts) <> 5 then
       raise exception 'INVALID_INPUT' using errcode = '22023';
     end if;
 
     begin
       cursor_priority := cursor_parts[1]::integer;
       cursor_updated_at := cursor_parts[2]::timestamptz;
-      cursor_id := cursor_parts[3]::uuid;
+      cursor_independent_evidence_count := cursor_parts[3]::bigint;
+      cursor_current_temporal_priority := cursor_parts[4]::integer;
+      cursor_id := cursor_parts[5]::uuid;
+
+      if cursor_priority < 1 or cursor_priority > 4
+        or cursor_independent_evidence_count < 0
+        or cursor_current_temporal_priority not in (0, 1)
+      then
+        raise exception 'INVALID_INPUT' using errcode = '22023';
+      end if;
     exception
       when others then
         raise exception 'INVALID_INPUT' using errcode = '22023';
     end;
   end if;
 
-  effective_limit := least(p_limit, case when p_cursor is null then 12 else 20 end);
+  effective_limit := least(p_limit, case when p_cursor is null then 10 else 20 end);
   node_limit := case when p_cursor is null and p_depth = 1 then 8 else 12 end;
 
   with recursive traversed as (
@@ -1737,12 +1917,16 @@ begin
         where relationship_evidence.relationship_id = relationships.id
           and relationship_evidence.user_id = current_user_id
           and relationship_evidence.relation_to_claim in ('supporting', 'contextual')
-      ) as independent_source_count,
-      (
-        relationships.start_date is null or relationships.start_date <= current_date
-      ) and (
-        relationships.end_date is null or relationships.end_date >= current_date
-      ) as is_current
+      ) as independent_evidence_count,
+      case when
+        (
+          relationships.start_date is null or relationships.start_date <= current_date
+        ) and (
+          relationships.end_date is null or relationships.end_date >= current_date
+        )
+        then 1
+        else 0
+      end as current_temporal_priority
     from public.relationships
     join traversed
       on traversed.depth < p_depth
@@ -1819,23 +2003,41 @@ begin
   ordered_edges as (
     select
       node_limited_edges.*,
+      row_number() over (
+        order by
+          node_limited_edges.status_priority,
+          node_limited_edges.updated_at desc,
+          node_limited_edges.independent_evidence_count desc,
+          node_limited_edges.current_temporal_priority desc,
+          node_limited_edges.id
+      ) as stream_rank,
       case when node_limited_edges.status = 'suggested' then
         row_number() over (
           partition by node_limited_edges.status
           order by
             node_limited_edges.updated_at desc,
-            node_limited_edges.independent_source_count desc,
-            node_limited_edges.is_current desc,
+            node_limited_edges.independent_evidence_count desc,
+            node_limited_edges.current_temporal_priority desc,
             node_limited_edges.id
         )
-      end as suggestion_rank
+      end as suggestion_rank,
+      case when node_limited_edges.status <> 'suggested' then
+        row_number() over (
+          partition by (node_limited_edges.status = 'suggested')
+          order by
+            node_limited_edges.status_priority,
+            node_limited_edges.updated_at desc,
+            node_limited_edges.independent_evidence_count desc,
+            node_limited_edges.current_temporal_priority desc,
+            node_limited_edges.id
+        )
+      end as visible_rank
     from node_limited_edges
   ),
   cursor_filtered_edges as (
     select ordered_edges.*
     from ordered_edges
-    where (ordered_edges.status <> 'suggested' or ordered_edges.suggestion_rank <= 2)
-      and (
+    where (
         cursor_priority is null
         or ordered_edges.status_priority > cursor_priority
         or (
@@ -1845,25 +2047,53 @@ begin
         or (
           ordered_edges.status_priority = cursor_priority
           and ordered_edges.updated_at = cursor_updated_at
+          and ordered_edges.independent_evidence_count < cursor_independent_evidence_count
+        )
+        or (
+          ordered_edges.status_priority = cursor_priority
+          and ordered_edges.updated_at = cursor_updated_at
+          and ordered_edges.independent_evidence_count = cursor_independent_evidence_count
+          and ordered_edges.current_temporal_priority < cursor_current_temporal_priority
+        )
+        or (
+          ordered_edges.status_priority = cursor_priority
+          and ordered_edges.updated_at = cursor_updated_at
+          and ordered_edges.independent_evidence_count = cursor_independent_evidence_count
+          and ordered_edges.current_temporal_priority = cursor_current_temporal_priority
           and ordered_edges.id > cursor_id
         )
       )
     order by
       ordered_edges.status_priority,
       ordered_edges.updated_at desc,
-      ordered_edges.independent_source_count desc,
-      ordered_edges.is_current desc,
+      ordered_edges.independent_evidence_count desc,
+      ordered_edges.current_temporal_priority desc,
       ordered_edges.id
     limit effective_limit + 1
   ),
   selected_edges as (
     select *
     from cursor_filtered_edges
+    where p_cursor is not null
+      or cursor_filtered_edges.stream_rank < coalesce(
+        (
+          select min(candidate.stream_rank)
+          from cursor_filtered_edges as candidate
+          where (
+            candidate.status = 'suggested'
+            and candidate.suggestion_rank > 2
+          ) or (
+            candidate.status <> 'suggested'
+            and candidate.visible_rank > 10
+          )
+        ),
+        effective_limit + 1
+      )
     order by
       cursor_filtered_edges.status_priority,
       cursor_filtered_edges.updated_at desc,
-      cursor_filtered_edges.independent_source_count desc,
-      cursor_filtered_edges.is_current desc,
+      cursor_filtered_edges.independent_evidence_count desc,
+      cursor_filtered_edges.current_temporal_priority desc,
       cursor_filtered_edges.id
     limit effective_limit
   ),
@@ -1886,8 +2116,8 @@ begin
     order by
       selected_edges.status_priority desc,
       selected_edges.updated_at,
-      selected_edges.independent_source_count,
-      selected_edges.is_current,
+      selected_edges.independent_evidence_count,
+      selected_edges.current_temporal_priority,
       selected_edges.id desc
     limit 1
   ),
@@ -1941,25 +2171,27 @@ begin
       ) order by
         selected_edges.status_priority,
         selected_edges.updated_at desc,
-        selected_edges.independent_source_count desc,
-        selected_edges.is_current desc,
+        selected_edges.independent_evidence_count desc,
+        selected_edges.current_temporal_priority desc,
         selected_edges.id
       )
       from selected_edges
     ), '[]'::jsonb),
     'page_info', jsonb_build_object(
       'next_cursor', case
-        when (select count(*) from cursor_filtered_edges) > effective_limit
+        when (select count(*) from cursor_filtered_edges) > (select count(*) from selected_edges)
         then (
           select
             last_edge.status_priority::text || '|' ||
             to_char(last_edge.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || 'Z|' ||
+            last_edge.independent_evidence_count::text || '|' ||
+            last_edge.current_temporal_priority::text || '|' ||
             last_edge.id::text
           from last_edge
         )
         else null
       end,
-      'has_more', (select count(*) from cursor_filtered_edges) > effective_limit
+      'has_more', (select count(*) from cursor_filtered_edges) > (select count(*) from selected_edges)
     ),
     'counts', jsonb_build_object(
       'visible', graph_counts.visible,
@@ -2021,7 +2253,13 @@ begin
     raise exception 'AUTH_REQUIRED' using errcode = '42501';
   end if;
 
-  if p_limit < 1 or p_limit > 100 then
+  if p_relationship_id is null
+    or p_limit is null
+    or p_limit < 1
+    or p_limit > 100
+    or length(coalesce(p_evidence_cursor, '')) > 512
+    or length(coalesce(p_history_cursor, '')) > 512
+  then
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;
 
@@ -2159,15 +2397,25 @@ begin
     ), '[]'::jsonb),
     'contradictions', coalesce((
       select jsonb_agg(jsonb_build_object(
-        'id', relationship_evidence.id,
-        'excerpt', relationship_evidence.excerpt,
-        'observed_at', relationship_evidence.observed_at,
-        'source_strength', relationship_evidence.source_strength
-      ) order by relationship_evidence.created_at desc)
-      from public.relationship_evidence
-      where relationship_evidence.relationship_id = relationship_record.id
-        and relationship_evidence.user_id = current_user_id
-        and relationship_evidence.relation_to_claim = 'contradicting'
+        'id', contradiction.id,
+        'excerpt', contradiction.excerpt,
+        'observed_at', contradiction.observed_at,
+        'source_strength', contradiction.source_strength
+      ) order by contradiction.created_at desc, contradiction.id desc)
+      from (
+        select
+          relationship_evidence.id,
+          relationship_evidence.excerpt,
+          relationship_evidence.observed_at,
+          relationship_evidence.source_strength,
+          relationship_evidence.created_at
+        from public.relationship_evidence
+        where relationship_evidence.relationship_id = relationship_record.id
+          and relationship_evidence.user_id = current_user_id
+          and relationship_evidence.relation_to_claim = 'contradicting'
+        order by relationship_evidence.created_at desc, relationship_evidence.id desc
+        limit p_limit
+      ) as contradiction
     ), '[]'::jsonb),
     'actions', jsonb_build_object(
       'can_confirm', relationship_record.status in ('suggested', 'supported', 'contradicted'),
@@ -2235,8 +2483,12 @@ begin
     raise exception 'AUTH_REQUIRED' using errcode = '42501';
   end if;
 
-  if p_filter not in ('suggestions', 'contradictions', 'sensitive', 'rejected_with_new_evidence')
-    or p_limit < 1 or p_limit > 30
+  if p_filter is null
+    or p_limit is null
+    or p_filter not in ('suggestions', 'contradictions', 'sensitive', 'rejected_with_new_evidence')
+    or p_limit < 1
+    or p_limit > 30
+    or length(coalesce(p_cursor, '')) > 512
   then
     raise exception 'INVALID_INPUT' using errcode = '22023';
   end if;

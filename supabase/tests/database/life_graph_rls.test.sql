@@ -27,6 +27,23 @@ values
 
 set local role service_role;
 
+select ok(
+  not has_table_privilege('service_role', 'public.relationships', 'DELETE'),
+  'service role cannot physically delete relationships'
+);
+
+select ok(
+  not has_table_privilege('service_role', 'public.relationship_evidence', 'DELETE')
+  and not has_table_privilege('service_role', 'public.relationship_evidence', 'UPDATE'),
+  'service role cannot mutate or delete append-only relationship evidence'
+);
+
+select ok(
+  not has_table_privilege('service_role', 'public.relationship_history', 'DELETE')
+  and not has_table_privilege('service_role', 'public.relationship_history', 'UPDATE'),
+  'service role cannot mutate or delete append-only relationship history'
+);
+
 select lives_ok($sql$
   select public.ingest_relationship_candidate(
     'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',

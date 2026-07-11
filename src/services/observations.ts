@@ -31,6 +31,13 @@ type ProcessObservationsResponse = {
   evidence?: MemoryEvidence[];
   entities: Entity[];
   memories: Memory[];
+  relationship_stats: {
+    created: number;
+    evidence_added: number;
+    promoted: number;
+    contradicted: number;
+    skipped: number;
+  };
   prompt_version?: string;
 };
 

@@ -6,9 +6,9 @@ grant select on table public.relationships to authenticated;
 grant select on table public.relationship_evidence to authenticated;
 grant select on table public.relationship_history to authenticated;
 
-grant select, insert, update, delete on table public.relationships to service_role;
-grant select, insert, update, delete on table public.relationship_evidence to service_role;
-grant select, insert, update, delete on table public.relationship_history to service_role;
+grant select, insert, update on table public.relationships to service_role;
+grant select, insert on table public.relationship_evidence to service_role;
+grant select, insert on table public.relationship_history to service_role;
 
 alter table public.relationships enable row level security;
 alter table public.relationship_evidence enable row level security;

@@ -10,7 +10,11 @@ import {
   type RelationshipSensitivity
 } from "../_shared/life-graph.ts";
 import { logSafeOperation, type ApiErrorCode } from "../_shared/http.ts";
-import { OpenAiRequestError, requestOpenAiJson } from "../_shared/openai.ts";
+import {
+  maximumOpenAiCompletionTokens,
+  OpenAiRequestError,
+  requestOpenAiJson
+} from "../_shared/openai.ts";
 
 type LifeOsSupabaseClient = SupabaseClient<Database>;
 type Confidence = "low" | "medium" | "high" | "confirmed";
@@ -455,6 +459,7 @@ async function generateBriefingWithOpenAi({
       apiKey,
       body: {
         model,
+        max_completion_tokens: maximumOpenAiCompletionTokens,
         messages: [
           {
             role: "system",
@@ -506,6 +511,9 @@ async function generateBriefingWithOpenAi({
       }
     });
   } catch (error) {
+    if (error instanceof OpenAiRequestError && error.failure === "input_too_large") {
+      throw new PublicError("Briefing context is too large to process safely.", 400, "INVALID_INPUT");
+    }
     if (error instanceof OpenAiRequestError && error.failure === "invalid_json") {
       throw new PublicError("Unable to generate a briefing right now.", 502, "AI_OUTPUT_INVALID");
     }

@@ -106,6 +106,16 @@ describe("Life Graph AI relationship validation", () => {
     expect(() => validateAiRelationships([
       buildRelationship({ evidence_observation_ids: [crypto.randomUUID()] })
     ], new Set([observationId]))).toThrow(/invalid observation ID/);
+
+    expect(() => validateAiRelationships([
+      buildRelationship({
+        temporal_context: {
+          start_date: "2026-02-30",
+          end_date: null,
+          date_precision: "exact"
+        }
+      })
+    ], new Set([observationId]))).toThrow(/ISO date/);
   });
 
   it("accepts the maximum canonical sensitivity without changing it", () => {

@@ -5,7 +5,11 @@ import {
 import type { Database } from "../_shared/database.ts";
 import { isRecord, readOpenAiJsonContent } from "../_shared/life-graph.ts";
 import { logSafeOperation, type ApiErrorCode } from "../_shared/http.ts";
-import { OpenAiRequestError, requestOpenAiJson } from "../_shared/openai.ts";
+import {
+  maximumOpenAiCompletionTokens,
+  OpenAiRequestError,
+  requestOpenAiJson
+} from "../_shared/openai.ts";
 
 type LifeOsSupabaseClient = SupabaseClient<Database>;
 type Confidence = "low" | "medium" | "high";
@@ -38,6 +42,7 @@ const observationTypes = new Set<ObservationType>([
 const confidenceLevels = new Set<Confidence>(["low", "medium", "high"]);
 const sensitivityLevels = new Set<Sensitivity>(["normal", "sensitive"]);
 const promptVersion = "life-os-analyze-capture-v2";
+const maximumCaptureLength = 12_000;
 
 const observationSchema = {
   type: "object",
@@ -169,6 +174,10 @@ Deno.serve(async (request) => {
       return jsonResponse({ observations: existingObservations ?? [] });
     }
 
+    if (capture.content.length > maximumCaptureLength) {
+      throw new PublicError("Capture is too large to analyze safely.", 400, "INVALID_INPUT");
+    }
+
     const aiObservations = await extractObservationsWithOpenAi({
       apiKey: readEnv("OPENAI_API_KEY"),
       captureContent: capture.content,
@@ -250,6 +259,7 @@ async function extractObservationsWithOpenAi({
       apiKey,
       body: {
         model,
+        max_completion_tokens: maximumOpenAiCompletionTokens,
         messages: [
           {
             role: "system",
@@ -271,6 +281,9 @@ async function extractObservationsWithOpenAi({
       }
     });
   } catch (error) {
+    if (error instanceof OpenAiRequestError && error.failure === "input_too_large") {
+      throw new PublicError("Capture is too large to analyze safely.", 400, "INVALID_INPUT");
+    }
     if (error instanceof OpenAiRequestError && error.failure === "invalid_json") {
       throw new PublicError("Unable to analyze this capture right now.", 502, "AI_OUTPUT_INVALID");
     }

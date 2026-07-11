@@ -220,7 +220,7 @@ export async function persistRelationshipSuggestions({
 }
 
 export function normalizeEntityReference(value: string) {
-  return value.trim().toLocaleLowerCase();
+  return value.trim().toLowerCase();
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -409,11 +409,29 @@ function readNullableDate(value: unknown, field: string): string | null {
   }
 
   const date = readBoundedString(value, field, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+  if (!isRealIsoDate(date)) {
     throw new Error(`AI field ${field} must be an ISO date.`);
   }
 
   return date;
+}
+
+function isRealIsoDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) {
+    return false;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1) {
+    return false;
+  }
+
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day <= (daysInMonth[month - 1] ?? 0);
 }
 
 function readNullableBoundedString(

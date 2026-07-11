@@ -81,8 +81,11 @@ try {
     capture_id: captureId
   }, accessToken, anonKey);
   assert.equal(processed.response.status, 200);
-  assert.ok(isRecord(processed.body) && isRecord(processed.body.relationships));
-  assert.deepEqual(processed.body.relationships, {
+  assert.ok(isRecord(processed.body));
+  assert.ok(Array.isArray(processed.body.entities));
+  assert.ok(Array.isArray(processed.body.memories));
+  assert.ok(isRecord(processed.body.relationship_stats));
+  assert.deepEqual(processed.body.relationship_stats, {
     created: 0,
     evidence_added: 0,
     promoted: 0,
@@ -146,7 +149,95 @@ try {
   assert.equal(relationshipCountError, null);
   assert.equal(relationshipCount, 0);
 
-  console.log("Edge Function integration tests passed (auth, stable errors, dry-run, pagination, cursor resume, idempotence, processed capture).");
+  const relationshipSourceId = randomUUID();
+  const relationshipTargetId = randomUUID();
+  const relationshipCaptureId = randomUUID();
+  const relationshipObservationId = randomUUID();
+  const { error: relationshipFixtureCaptureError } = await serviceClient.from("captures").insert({
+    id: relationshipCaptureId,
+    user_id: userId,
+    content: "Concurrent relationship ingestion fixture.",
+    status: "archived",
+    sensitivity: "normal",
+    source: "text"
+  });
+  assert.equal(relationshipFixtureCaptureError, null);
+  const { error: relationshipFixtureObservationError } = await serviceClient.from("observations").insert({
+    id: relationshipObservationId,
+    user_id: userId,
+    capture_id: relationshipCaptureId,
+    content: "The source contributes to the target.",
+    type: "relationship",
+    confidence: "medium",
+    sensitivity: "normal",
+    status: "suggested"
+  });
+  assert.equal(relationshipFixtureObservationError, null);
+  const { error: relationshipFixtureEntitiesError } = await serviceClient.from("entities").insert([
+    {
+      id: relationshipSourceId,
+      user_id: userId,
+      name: "Concurrent source",
+      type: "person",
+      confidence: "high",
+      sensitivity: "normal",
+      status: "active"
+    },
+    {
+      id: relationshipTargetId,
+      user_id: userId,
+      name: "Concurrent target",
+      type: "project",
+      confidence: "high",
+      sensitivity: "normal",
+      status: "active"
+    }
+  ]);
+  assert.equal(relationshipFixtureEntitiesError, null);
+
+  const ingestionArgs = {
+    p_user_id: userId,
+    p_source_entity_id: relationshipSourceId,
+    p_target_entity_id: relationshipTargetId,
+    p_relationship_type: "contributes_to",
+    p_explicitness: "explicit",
+    p_observation_ids: [relationshipObservationId]
+  };
+  const concurrentIngestions = await Promise.all([
+    serviceClient.rpc("ingest_relationship_candidate", ingestionArgs),
+    serviceClient.rpc("ingest_relationship_candidate", ingestionArgs)
+  ]);
+  for (const ingestion of concurrentIngestions) {
+    assert.equal(ingestion.error, null);
+    assert.ok(isRecord(ingestion.data));
+  }
+  assert.equal(
+    concurrentIngestions.reduce((total, ingestion) => total + readNumber(ingestion.data, "created"), 0),
+    1
+  );
+  assert.equal(
+    concurrentIngestions.reduce((total, ingestion) => total + readNumber(ingestion.data, "evidence_added"), 0),
+    1
+  );
+
+  const { data: concurrentRelationship, error: concurrentRelationshipError } = await serviceClient
+    .from("relationships")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("source_entity_id", relationshipSourceId)
+    .eq("target_entity_id", relationshipTargetId)
+    .single();
+  assert.equal(concurrentRelationshipError, null);
+  assert.ok(concurrentRelationship);
+  const { count: createdHistoryCount, error: createdHistoryError } = await serviceClient
+    .from("relationship_history")
+    .select("id", { count: "exact", head: true })
+    .eq("relationship_id", concurrentRelationship.id)
+    .eq("action", "created");
+  assert.equal(createdHistoryError, null);
+  assert.equal(createdHistoryCount, 1);
+
+  console.log("Edge Function integration tests passed (auth, stable errors, dry-run, pagination, cursor resume, idempotence, concurrency, processed capture).");
 } finally {
   if (userId) {
     await serviceClient.auth.admin.deleteUser(userId);
@@ -211,6 +302,12 @@ function createExpiredToken(userIdValue, secret) {
 
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readNumber(value, field) {
+  assert.ok(isRecord(value));
+  assert.equal(typeof value[field], "number");
+  return value[field];
 }
 
 function requireEnvironment(name) {

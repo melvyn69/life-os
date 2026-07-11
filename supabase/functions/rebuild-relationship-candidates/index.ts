@@ -17,7 +17,11 @@ import {
   logSafeOperation,
   type ApiErrorCode
 } from "../_shared/http.ts";
-import { OpenAiRequestError, requestOpenAiJson } from "../_shared/openai.ts";
+import {
+  maximumOpenAiCompletionTokens,
+  OpenAiRequestError,
+  requestOpenAiJson
+} from "../_shared/openai.ts";
 
 type LifeOsSupabaseClient = SupabaseClient<Database>;
 
@@ -122,6 +126,8 @@ Deno.serve(async (request) => {
     let relationshipsContradicted = 0;
     let relationshipsSkipped = 0;
     let relationshipValidationFailures = 0;
+    let interrupted = false;
+    let resumeCursor = input.cursor;
 
     if (!input.dry_run) {
       const apiKey = readRequiredEnv("OPENAI_API_KEY");
@@ -142,8 +148,10 @@ Deno.serve(async (request) => {
           relationshipsPromoted += stats.promoted;
           relationshipsContradicted += stats.contradicted;
           relationshipsSkipped += stats.skipped;
+          resumeCursor = encodeCursor(capture);
         } catch (error) {
           failed += 1;
+          interrupted = true;
           if (error instanceof ApiError && error.code === "AI_OUTPUT_INVALID") {
             relationshipValidationFailures += 1;
           }
@@ -154,12 +162,18 @@ Deno.serve(async (request) => {
             result: "failure",
             error_code: error instanceof ApiError ? error.code : "INTERNAL_ERROR"
           }));
+          break;
         }
       }
     }
 
     const lastCapture = page.at(-1);
-    const nextCursor = hasMore && lastCapture ? encodeCursor(lastCapture) : null;
+    const nextCursor = input.dry_run
+      ? hasMore && lastCapture ? encodeCursor(lastCapture) : null
+      : interrupted
+        ? resumeCursor
+        : hasMore && lastCapture ? encodeCursor(lastCapture) : null;
+    const responseHasMore = interrupted || hasMore;
 
     metrics = {
       captures_selected: page.length,
@@ -176,7 +190,7 @@ Deno.serve(async (request) => {
 
     return createJsonResponse({
       cursor: nextCursor,
-      has_more: hasMore,
+      has_more: responseHasMore,
       dry_run: input.dry_run,
       stats: {
         captures_selected: page.length,
@@ -233,6 +247,13 @@ async function rebuildCaptureRelationships({
 
   if (observations.length === 0 || entities.length < 2) {
     return { created: 0, evidence_added: 0, promoted: 0, contradicted: 0, skipped: 0 };
+  }
+
+  if (
+    capture.content.length > maximumCaptureLength ||
+    observations.some((observation) => observation.content.length > maximumObservationLength)
+  ) {
+    throw new ApiError("INVALID_INPUT", "Relationship extraction input is too large.", 400);
   }
 
   const relationships = await extractRelationships({
@@ -332,17 +353,15 @@ async function extractRelationships({
       apiKey,
       body: {
         model,
+        max_completion_tokens: maximumOpenAiCompletionTokens,
         messages: [
           { role: "system", content: relationshipOnlyPrompt },
           {
             role: "user",
             content: JSON.stringify({
-              capture: { content: capture.content.slice(0, maximumCaptureLength) },
+              capture: { content: capture.content },
               entities,
-              observations: observations.map((observation) => ({
-                ...observation,
-                content: observation.content.slice(0, maximumObservationLength)
-              }))
+              observations
             })
           }
         ],
@@ -357,6 +376,9 @@ async function extractRelationships({
       }
     });
   } catch (error) {
+    if (error instanceof OpenAiRequestError && error.failure === "input_too_large") {
+      throw new ApiError("INVALID_INPUT", "Relationship extraction input is too large.", 400);
+    }
     if (error instanceof OpenAiRequestError && error.failure === "invalid_json") {
       throw new ApiError("AI_OUTPUT_INVALID", "Relationship extraction returned invalid output.", 502);
     }
@@ -441,7 +463,7 @@ function buildUniqueEntityMap(entities: BackfillEntity[]) {
   const ambiguous = new Set<string>();
 
   for (const entity of entities) {
-    const key = entity.name.trim().toLocaleLowerCase();
+    const key = entity.name.trim().toLowerCase();
     if (entityIds.has(key)) {
       entityIds.delete(key);
       ambiguous.add(key);
@@ -458,6 +480,10 @@ function encodeCursor(capture: Pick<BackfillCapture, "created_at" | "id">) {
 }
 
 function decodeCursor(value: string) {
+  if (value.length > 512) {
+    throw new ApiError("INVALID_INPUT", "Cursor is invalid.", 400);
+  }
+
   let parsed: unknown;
   try {
     parsed = JSON.parse(atob(value));
@@ -469,7 +495,13 @@ function decodeCursor(value: string) {
     throw new ApiError("INVALID_INPUT", "Cursor is invalid.", 400);
   }
 
-  if (!/^\d{4}-\d{2}-\d{2}T/.test(parsed.created_at) || !/^[0-9a-f-]{36}$/i.test(parsed.id)) {
+  const timestampPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (
+    !timestampPattern.test(parsed.created_at) ||
+    !Number.isFinite(Date.parse(parsed.created_at)) ||
+    !uuidPattern.test(parsed.id)
+  ) {
     throw new ApiError("INVALID_INPUT", "Cursor is invalid.", 400);
   }
 
