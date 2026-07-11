@@ -1,6 +1,6 @@
 RFC-002 — Life Graph
 
-Statut : Draft
+Statut : Approved
 Version cible : Life OS v0.3
 Auteur décisionnaire : Fondateur
 Responsables du cadrage : Product, CTO, AI Architecture

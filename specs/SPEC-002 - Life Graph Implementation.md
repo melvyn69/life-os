@@ -1,6 +1,6 @@
 SPEC-002 — Life Graph Implementation
 
-Statut : Draft technique
+Statut : Approved
 Version cible : Life OS v0.3
 Source produit canonique : RFC-002 — Life Graph, Approved
 Dépendance principale : Life OS v0.2 — Living Memory
