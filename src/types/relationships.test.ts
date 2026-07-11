@@ -10,7 +10,6 @@ describe("relationship qualitative display state", () => {
     ["suggested", "Suggested"],
     ["supported", "Supported"],
     ["confirmed", "Confirmed"],
-    ["corrected", "Confirmed"],
     ["contradicted", "Needs review"],
     ["rejected", "Needs review"],
     ["outdated", "Past"],

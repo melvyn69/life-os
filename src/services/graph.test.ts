@@ -55,4 +55,10 @@ describe("focused graph response conversion", () => {
     response.edges[0] = { ...response.edges[0], status: "active" };
     expect(() => parseFocusedGraph(response)).toThrow(/status is invalid/);
   });
+
+  it("rejects a continuation response without a cursor", () => {
+    const response = buildGraphResponse();
+    response.page_info = { next_cursor: null, has_more: true };
+    expect(() => parseFocusedGraph(response)).toThrow(/pagination response is invalid/);
+  });
 });

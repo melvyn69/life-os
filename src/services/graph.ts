@@ -124,13 +124,19 @@ export function parseFocusedGraph(value: unknown): FocusedGraphPage {
     throw new Error("The focused graph response is invalid.");
   }
 
+  const nextCursor = readNullableString(value.page_info.next_cursor, "graph next cursor");
+  const hasMore = readBoolean(value.page_info.has_more, "graph has more");
+  if (hasMore && nextCursor === null) {
+    throw new Error("The focused graph pagination response is invalid.");
+  }
+
   return {
     focus_entity: parseGraphNode(value.focus_entity),
     nodes: value.nodes.map(parseGraphNode),
     edges: value.edges.map(parseGraphEdge),
     page_info: {
-      next_cursor: readNullableString(value.page_info.next_cursor, "graph next cursor"),
-      has_more: readBoolean(value.page_info.has_more, "graph has more")
+      next_cursor: nextCursor,
+      has_more: hasMore
     },
     counts: {
       visible: readNumber(value.counts.visible, "visible graph count"),
@@ -190,7 +196,9 @@ function readStoredGraphFocusId() {
     return null;
   }
   const value = window.localStorage.getItem(graphFocusStorageKey);
-  return value && /^[0-9a-f-]{36}$/i.test(value) ? value : null;
+  return value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : null;
 }
 
 function escapeSearchPattern(value: string) {

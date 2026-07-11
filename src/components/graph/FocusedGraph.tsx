@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GraphErrorState, GraphLoadingState } from "@/components/graph/GraphStates";
+import { AuthRequiredState } from "@/components/common/AuthRequiredState";
 import { GraphFilters } from "@/components/graph/GraphFilters";
 import { GraphLegend } from "@/components/graph/GraphLegend";
 import { GraphNodeCard } from "@/components/graph/GraphNodeCard";
@@ -31,6 +32,9 @@ export function FocusedGraph({ entityId }: { entityId: string }) {
   }
 
   if (query.isError || !graph) {
+    if (isAuthRequiredError(query.error)) {
+      return <AuthRequiredState />;
+    }
     return <GraphErrorState permissionDenied={!isAuthRequiredError(query.error) && isPermissionError(query.error)} />;
   }
 

@@ -1,15 +1,17 @@
 import { createBrowserRouter } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
-import { Briefing } from "@/routes/Briefing";
-import { Capture } from "@/routes/Capture";
-import { Entities } from "@/routes/Entities";
-import { Home } from "@/routes/Home";
-import { Inbox } from "@/routes/Inbox";
-import { Memory } from "@/routes/Memory";
-import { Settings } from "@/routes/Settings";
-import { EntityDetailPage } from "@/pages/EntityDetail";
-import { LifeGraphPage } from "@/pages/LifeGraph";
-import { RelationshipReviewPage } from "@/pages/RelationshipReview";
+import {
+  Briefing,
+  Capture,
+  Entities,
+  EntityDetailPage,
+  Home,
+  Inbox,
+  LifeGraphPage,
+  Memory,
+  RelationshipReviewPage,
+  Settings
+} from "@/routes/lazyRoutes";
 
 export const router = createBrowserRouter([
   {

@@ -14,7 +14,6 @@ export type RelationshipStatus =
   | "suggested"
   | "supported"
   | "confirmed"
-  | "corrected"
   | "rejected"
   | "contradicted"
   | "outdated"
@@ -186,7 +185,6 @@ export function getRelationshipDisplayState(
     case "supported":
       return "supported";
     case "confirmed":
-    case "corrected":
       return "confirmed";
     case "contradicted":
     case "rejected":

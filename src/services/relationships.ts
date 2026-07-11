@@ -145,6 +145,7 @@ export async function restoreRelationship(relationshipId: string) {
 }
 
 export async function listEntityRelationships(entityId: string) {
+  requireUuid(entityId);
   const userId = await getCurrentUserId();
   const { data, error } = await supabase
     .from("relationships")
@@ -205,6 +206,14 @@ export function parseRelationshipDetail(value: unknown): RelationshipDetail {
     throw new Error("The relationship detail response is invalid.");
   }
 
+  const evidenceNextCursor = readNullableString(value.page_info.evidence_next_cursor, "evidence cursor");
+  const evidenceHasMore = readBoolean(value.page_info.evidence_has_more, "more evidence");
+  const historyNextCursor = readNullableString(value.page_info.history_next_cursor, "history cursor");
+  const historyHasMore = readBoolean(value.page_info.history_has_more, "more history");
+  if ((evidenceHasMore && evidenceNextCursor === null) || (historyHasMore && historyNextCursor === null)) {
+    throw new Error("The relationship detail pagination response is invalid.");
+  }
+
   return {
     relationship: parseRelationship(value.relationship),
     source_entity: parseRelationshipEntity(value.source_entity),
@@ -230,10 +239,10 @@ export function parseRelationshipDetail(value: unknown): RelationshipDetail {
     }),
     actions: parseRelationshipActions(value.actions),
     page_info: {
-      evidence_next_cursor: readNullableString(value.page_info.evidence_next_cursor, "evidence cursor"),
-      evidence_has_more: readBoolean(value.page_info.evidence_has_more, "more evidence"),
-      history_next_cursor: readNullableString(value.page_info.history_next_cursor, "history cursor"),
-      history_has_more: readBoolean(value.page_info.history_has_more, "more history")
+      evidence_next_cursor: evidenceNextCursor,
+      evidence_has_more: evidenceHasMore,
+      history_next_cursor: historyNextCursor,
+      history_has_more: historyHasMore
     }
   };
 }
@@ -243,11 +252,17 @@ export function parseRelationshipReviewPage(value: unknown): RelationshipReviewP
     throw new Error("The relationship review response is invalid.");
   }
 
+  const nextCursor = readNullableString(value.page_info.next_cursor, "review cursor");
+  const hasMore = readBoolean(value.page_info.has_more, "more review items");
+  if (hasMore && nextCursor === null) {
+    throw new Error("The relationship review pagination response is invalid.");
+  }
+
   return {
     items: value.items.map(parseRelationshipReviewItem),
     page_info: {
-      next_cursor: readNullableString(value.page_info.next_cursor, "review cursor"),
-      has_more: readBoolean(value.page_info.has_more, "more review items")
+      next_cursor: nextCursor,
+      has_more: hasMore
     }
   };
 }
@@ -304,7 +319,6 @@ export function readRelationshipStatus(value: unknown): RelationshipStatus {
     case "suggested":
     case "supported":
     case "confirmed":
-    case "corrected":
     case "rejected":
     case "contradicted":
     case "outdated":
@@ -559,4 +573,11 @@ function getRelationshipErrorMessage(code: string) {
     default:
       return "Unable to update this relationship right now.";
   }
+}
+
+function requireUuid(value: string) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new RelationshipServiceError("INVALID_INPUT");
+  }
+  return value;
 }

@@ -170,6 +170,23 @@ test("graph navigation has accessible alternatives and mobile touch targets", as
   await expect(page.locator("body")).not.toHaveCSS("overflow-x", "scroll");
 });
 
+test("existing routes remain available after route-level bundle splitting", async ({ page }) => {
+  const routes = [
+    { path: "/", heading: "Home" },
+    { path: "/capture", heading: "Capture" },
+    { path: "/inbox", heading: "Inbox" },
+    { path: "/entities", heading: "Entities" },
+    { path: "/memory", heading: "Memory" },
+    { path: "/briefing", heading: "Briefing" },
+    { path: "/settings", heading: "Settings" }
+  ];
+
+  for (const route of routes) {
+    await page.goto(route.path, { waitUntil: "networkidle" });
+    await expect(page.getByRole("main").getByRole("heading", { name: route.heading, exact: true })).toBeVisible();
+  }
+});
+
 function authenticatedClient(authSession: Session): SupabaseClient<Database> {
   return createClient<Database>(apiUrl, anonKey, {
     global: {

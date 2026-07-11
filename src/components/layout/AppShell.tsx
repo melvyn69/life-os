@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { BottomNav } from "@/components/layout/BottomNav";
 import { MobileHeader } from "@/components/layout/MobileHeader";
@@ -25,7 +26,9 @@ export function AppShell() {
       <div className="mx-auto min-h-dvh w-full max-w-xl border-x border-border/50 bg-background">
         <MobileHeader title={title} />
         <main className="mx-auto w-full max-w-xl px-5 pb-44 pt-5 sm:px-6 sm:pb-28">
-          <Outlet />
+          <Suspense fallback={<div aria-label="Loading page" className="h-48 animate-pulse rounded-xl bg-muted" role="status" />}>
+            <Outlet />
+          </Suspense>
         </main>
         <BottomNav />
       </div>

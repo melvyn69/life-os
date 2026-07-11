@@ -48,10 +48,18 @@ export function LifeGraphPage() {
           className="mt-2 min-h-11 w-full rounded-md border border-input bg-background px-3"
           id="graph-entity-search"
           onChange={(event) => setSearch(event.target.value)}
+          maxLength={120}
           placeholder="Entity name"
           value={search}
         />
         {entitySearch.isFetching ? <p className="mt-3 text-sm text-muted-foreground">Searching…</p> : null}
+        {entitySearch.isError ? (
+          <p className="mt-3 text-sm text-destructive" role="alert">
+            {typeof navigator !== "undefined" && !navigator.onLine
+              ? "You are offline. Entity search is unavailable."
+              : "Unable to search entities right now."}
+          </p>
+        ) : null}
         <ul className="mt-3 space-y-2 text-left">
           {(entitySearch.data ?? []).map((entity) => (
             <li key={entity.id}>

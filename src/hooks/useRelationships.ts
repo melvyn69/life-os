@@ -43,18 +43,8 @@ export function useRelationshipDetail(relationshipId: string | null) {
       pageParam.historyCursor
     ),
     initialPageParam: initialRelationshipDetailCursor,
-    getNextPageParam: (lastPage, pages) => {
-      if (pages.length >= 5) {
-        return undefined;
-      }
-      if (!lastPage.page_info.evidence_has_more && !lastPage.page_info.history_has_more) {
-        return undefined;
-      }
-      return {
-        evidenceCursor: lastPage.page_info.evidence_next_cursor,
-        historyCursor: lastPage.page_info.history_next_cursor
-      };
-    },
+    getNextPageParam: (lastPage, pages, lastPageParam) =>
+      getRelationshipDetailNextPageParam(lastPage, pages.length, lastPageParam),
     enabled: relationshipId !== null,
     staleTime: 60_000
   });
@@ -63,6 +53,39 @@ export function useRelationshipDetail(relationshipId: string | null) {
     ...query,
     data: mergeRelationshipDetailPages(query.data?.pages ?? [])
   };
+}
+
+export function getRelationshipDetailNextPageParam(
+  lastPage: {
+    evidence: Array<{ created_at: string; id: string }>;
+    history: Array<{ created_at: string; id: string }>;
+    page_info: RelationshipDetail["page_info"];
+  },
+  pageCount: number,
+  lastPageParam: typeof initialRelationshipDetailCursor
+) {
+  if (pageCount >= 5) {
+    return undefined;
+  }
+  if (!lastPage.page_info.evidence_has_more && !lastPage.page_info.history_has_more) {
+    return undefined;
+  }
+  return {
+    evidenceCursor: lastPage.page_info.evidence_has_more
+      ? lastPage.page_info.evidence_next_cursor
+      : terminalCursor(lastPage.evidence, lastPageParam.evidenceCursor),
+    historyCursor: lastPage.page_info.history_has_more
+      ? lastPage.page_info.history_next_cursor
+      : terminalCursor(lastPage.history, lastPageParam.historyCursor)
+  };
+}
+
+function terminalCursor(
+  items: Array<{ created_at: string; id: string }>,
+  fallback: string | null
+) {
+  const lastItem = items.at(-1);
+  return lastItem ? `${lastItem.created_at}|${lastItem.id}` : fallback;
 }
 
 export function useRelationshipReviewQueue(filter: RelationshipReviewFilter) {
